@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Release mode
+        type: choice
+        options: [stable, dev, check]
+        default: dev
+      dry-run:
+        description: Run without publishing
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, 'chore(release):') }}
+    steps:
+      - name: Resolve mode
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_MODE: ${{ inputs.mode }}
+        run: |
+          case "$EVENT" in
+            schedule) mode=stable ;;
+            workflow_dispatch) mode="$INPUT_MODE" ;;
+            *) mode=dev ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --features axum,maxmind,metrics,testing
+      - uses: a-line-services/release-pilot@v1
+        with:
+          mode: ${{ steps.mode.outputs.mode }}
+          dry-run: ${{ inputs.dry-run || false }}
+          cargo-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
