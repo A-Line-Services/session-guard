@@ -63,14 +63,14 @@ Code must be formatted with `rustfmt` and pass clippy (`pedantic`) with
 ## Pull requests
 
 Releases are automated with
-[release-pilot](https://github.com/A-Line-Services/release-pilot). Label each
-PR with one of:
+[release-pilot](https://github.com/A-Line-Services/release-pilot) and run
+weekly when there are changes. Label each PR with one of:
 
-- `release:major`, `release:minor`, `release:patch`
-- `release:alpha`, `release:beta`, `release:rc`
+- `release:major`, `release:minor`, `release:patch` (default when unlabelled)
 - `release:skip` (docs, CI, refactors with no user-facing change)
 
-Add user-facing changes to `CHANGELOG.md` under the upcoming release.
+`CHANGELOG.md` is generated from merged PR titles at release time, so give PRs
+a [Conventional Commits](https://www.conventionalcommits.org/) title.
 
 ## Commits
 

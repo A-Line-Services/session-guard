@@ -1,60 +1,119 @@
-name: Release
+name: Weekly Release
+run-name: weekly-release
 
 on:
-  push:
-    branches: [main]
   schedule:
+    # Every Monday at 9:00 AM UTC
     - cron: "0 9 * * 1"
   workflow_dispatch:
     inputs:
-      mode:
-        description: Release mode
-        type: choice
-        options: [stable, dev, check]
-        default: dev
-      dry-run:
-        description: Run without publishing
+      force:
+        description: Force release even without code changes
         type: boolean
         default: false
+      include_ci_changes:
+        description: Include .github/ changes in release check
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
   pull-requests: read
 
-concurrency:
-  group: release
-  cancel-in-progress: false
-
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: release
+  check-changes:
+    name: Check for Changes
     runs-on: ubuntu-latest
-    if: ${{ !contains(github.event.head_commit.message, 'chore(release):') }}
+    outputs:
+      has_changes: ${{ steps.check.outputs.has_changes }}
     steps:
-      - name: Resolve mode
-        id: mode
-        env:
-          EVENT: ${{ github.event_name }}
-          INPUT_MODE: ${{ inputs.mode }}
-        run: |
-          case "$EVENT" in
-            schedule) mode=stable ;;
-            workflow_dispatch) mode="$INPUT_MODE" ;;
-            *) mode=dev ;;
-          esac
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --features axum,maxmind,metrics,testing
-      - uses: a-line-services/release-pilot@v1
+
+      - name: Check for changes since last release
+        id: check
+        env:
+          FORCE: ${{ inputs.force }}
+          INCLUDE_CI: ${{ inputs.include_ci_changes }}
+        run: |
+          if [ "$FORCE" == "true" ]; then
+            echo "Force release requested"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous release found, proceeding with release"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Last release tag: $LAST_TAG"
+
+          # Files changed since the last release, ignoring version bump commits
+          CHANGED_FILES=$(git log "${LAST_TAG}..HEAD" --grep="chore(release):" --invert-grep --name-only --pretty=format: | sort -u | grep -v '^$' || echo "")
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No files changed since last release"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Files changed since $LAST_TAG:"
+          echo "$CHANGED_FILES"
+
+          if [ "$INCLUDE_CI" != "true" ]; then
+            RELEASE_FILES=$(echo "$CHANGED_FILES" | grep -v '^\.github/' || echo "")
+          else
+            RELEASE_FILES="$CHANGED_FILES"
+            echo "(including .github/ changes due to manual override)"
+          fi
+
+          if [ -n "$RELEASE_FILES" ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "Release needed - found changes outside .github/"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No release needed - only .github/ changes detected"
+          fi
+
+  release:
+    name: Release
+    needs: check-changes
+    if: needs.check-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      skipped: ${{ steps.release.outputs.skipped }}
+    steps:
+      - uses: actions/checkout@v6
         with:
-          mode: ${{ steps.mode.outputs.mode }}
-          dry-run: ${{ inputs.dry-run || false }}
-          cargo-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test --features axum,maxmind,metrics,testing
+
+      - name: Release with release-pilot
+        id: release
+        uses: a-line-services/release-pilot@v1
+        with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          cargo-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  no-release:
+    name: No Release Needed
+    needs: check-changes
+    if: needs.check-changes.outputs.has_changes == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No changes detected since last release. Skipping release."

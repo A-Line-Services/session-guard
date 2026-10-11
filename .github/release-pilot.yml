@@ -1,5 +1,44 @@
+# Release Pilot Configuration
+# https://github.com/A-Line-Services/release-pilot
+
 packages:
   - name: session-guard
     ecosystem: cargo
+    path: .
+
+labels:
+  major: "release:major"
+  minor: "release:minor"
+  patch: "release:patch"
+  skip: "release:skip"
+
 version:
-  devRelease: true
+  defaultBump: patch
+  devRelease: false
+
+git:
+  tagPrefix: v
+  commitMessage: "chore(release): {version}"
+  pushVersionCommit: true
+  pushTag: true
+
+publish:
+  enabled: true
+
+githubRelease:
+  enabled: true
+  draft: false
+  generateNotes: true
+
+changelog:
+  enabled: true
+  file: CHANGELOG.md
+
+# Update version references in non-package files
+versionFiles:
+  enabled: true
+  files:
+    # README.md cargo dependency example
+    - file: README.md
+      pattern: 'session-guard = \{ version = "[0-9]+\.[0-9]+"'
+      replace: 'session-guard = { version = "{major}.{minor}"'
