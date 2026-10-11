@@ -309,7 +309,7 @@ impl ValkeyStore {
     /// # Errors
     ///
     /// If the URL is invalid or the server is unreachable.
-    pub async fn connect(url: &str) -> Result<Self, StoreError> {
+    pub async fn connect(url: &str) -> Result<Self, redis::RedisError> {
         let client = redis::Client::open(url)?;
         Ok(Self::new(ConnectionManager::new(client).await?))
     }

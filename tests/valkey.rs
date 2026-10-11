@@ -160,3 +160,11 @@ async fn debug_hides_connection_details() {
     assert!(debug.contains("ValkeyStore"));
     assert!(!debug.contains("redis://"));
 }
+
+#[tokio::test]
+async fn connect_errors_convert_into_box_dyn_error() {
+    async fn connect(url: &str) -> Result<ValkeyStore, Box<dyn std::error::Error>> {
+        Ok(ValkeyStore::connect(url).await?)
+    }
+    assert!(connect("not a url").await.is_err());
+}
