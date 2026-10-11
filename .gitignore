@@ -6,3 +6,4 @@
 session-guard.zip
 *.profraw
 lcov.info
+/.claude/
