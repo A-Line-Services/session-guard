@@ -429,6 +429,10 @@ async fn step_up_flow() {
     assert!(a.assessment.signals.is_empty(), "baseline was reset to the new client");
     assert!(!h.guard.requires_reauth(&a.session, mins(5)));
     assert_eq!(h.count(EventKind::StepUpCompleted), 1);
+    // Step-up does not extend the absolute lifetime.
+    let lifetime = chrono::TimeDelta::days(30);
+    assert_eq!(a.session.expires_at, start() + lifetime);
+    assert_eq!(t1.expires_at(), start() + lifetime);
 }
 
 #[tokio::test]

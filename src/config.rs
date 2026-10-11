@@ -260,7 +260,8 @@ impl GuardConfigBuilder {
         self
     }
 
-    /// Absolute session lifetime, counted from login. Default 30 days.
+    /// Absolute session lifetime, counted from login. Activity, rotation and step-up never extend
+    /// it; the subject must log in again. Default 30 days.
     pub fn session_lifetime(mut self, lifetime: Duration) -> Self {
         self.session_lifetime = lifetime;
         self
