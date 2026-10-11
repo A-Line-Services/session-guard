@@ -6,6 +6,9 @@
 //! `store_conformance!` (feature `testing`) suite against it.
 
 mod memory;
+#[cfg(feature = "postgres")]
+#[cfg_attr(docsrs, doc(cfg(feature = "postgres")))]
+mod postgres;
 
 use std::future::Future;
 
@@ -13,6 +16,9 @@ use chrono::{DateTime, TimeDelta, Utc};
 use uuid::Uuid;
 
 pub use memory::MemoryStore;
+#[cfg(feature = "postgres")]
+#[cfg_attr(docsrs, doc(cfg(feature = "postgres")))]
+pub use postgres::PgStore;
 
 use crate::{
     error::StoreError,
