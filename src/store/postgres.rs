@@ -32,12 +32,6 @@ static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| {
 /// Partial unique index allowing one current token per session.
 const CURRENT_TOKEN_INDEX: &str = "session_guard_tokens_current_idx";
 
-macro_rules! session_columns {
-    () => {
-        "s.id, s.subject, s.created_at, s.authenticated_at, s.last_seen_at, s.expires_at, s.step_up_required, s.baseline"
-    };
-}
-
 /// Stores sessions in PostgreSQL through a sqlx [`PgPool`]. Shared safely by any number of
 /// processes; rotations are single transactions with a conditional update, and a partial unique
 /// index guarantees at most one current token per session.
@@ -263,18 +257,18 @@ impl SessionStore for PgStore {
     }
 
     async fn find_by_token(&self, token: &TokenHash) -> Result<Option<TokenLookup>, StoreError> {
-        let row = sqlx::query(concat!(
-            "SELECT ",
-            session_columns!(),
-            ", t.hash, t.issued_at, t.first_used_at, t.superseded_at,
-                 EXISTS (
-                     SELECT 1 FROM session_guard_tokens n
-                     WHERE n.session_id = t.session_id AND n.seq > t.seq AND n.first_used_at IS NOT NULL
-                 ) AS newer_token_used
+        let row = sqlx::query(
+            "SELECT s.id, s.subject, s.created_at, s.authenticated_at, s.last_seen_at, s.expires_at,
+                    s.step_up_required, s.baseline,
+                    t.hash, t.issued_at, t.first_used_at, t.superseded_at,
+                    EXISTS (
+                        SELECT 1 FROM session_guard_tokens n
+                        WHERE n.session_id = t.session_id AND n.seq > t.seq AND n.first_used_at IS NOT NULL
+                    ) AS newer_token_used
              FROM session_guard_tokens t
              JOIN session_guard_sessions s ON s.id = t.session_id
-             WHERE t.hash = $1"
-        ))
+             WHERE t.hash = $1",
+        )
         .bind(&token.as_bytes()[..])
         .fetch_optional(&self.pool)
         .await?;
@@ -315,11 +309,12 @@ impl SessionStore for PgStore {
     }
 
     async fn list_subject_sessions(&self, subject: &str) -> Result<Vec<SessionRecord>, StoreError> {
-        let rows = sqlx::query(concat!(
-            "SELECT ",
-            session_columns!(),
-            " FROM session_guard_sessions s WHERE s.subject = $1"
-        ))
+        let rows = sqlx::query(
+            "SELECT s.id, s.subject, s.created_at, s.authenticated_at, s.last_seen_at, s.expires_at,
+                    s.step_up_required, s.baseline
+             FROM session_guard_sessions s
+             WHERE s.subject = $1",
+        )
         .bind(subject)
         .fetch_all(&self.pool)
         .await?;
