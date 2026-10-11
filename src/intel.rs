@@ -2,6 +2,13 @@
 
 use std::net::IpAddr;
 
+#[cfg(feature = "maxmind")]
+#[cfg_attr(docsrs, doc(cfg(feature = "maxmind")))]
+mod maxmind;
+#[cfg(feature = "maxmind")]
+#[cfg_attr(docsrs, doc(cfg(feature = "maxmind")))]
+pub use maxmind::{MaxMindDatabase, MaxMindError, MaxMindIntel};
+
 /// What an [`IpIntel`] source knows about an address.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -22,7 +29,7 @@ impl IpInfo {
 /// A geolocation / ASN source. Without one, IP changes are judged by network prefix only.
 ///
 /// Lookups run on the request path and must be fast and non-blocking. With the `maxmind`
-/// feature, `MaxMindIntel` reads memory-mapped `GeoLite2` / `GeoIP2` databases.
+/// feature, `MaxMindIntel` reads `GeoLite2` / `GeoIP2` databases held in memory.
 pub trait IpIntel: Send + Sync + 'static {
     /// Looks up `ip`. Return empty fields for unknown addresses; never panic.
     fn lookup(&self, ip: IpAddr) -> IpInfo;

@@ -73,6 +73,30 @@ mod telemetry;
 pub mod testing;
 pub mod token;
 
+/// Internals the crate's own benchmarks measure. Not part of the public API; may change in any
+/// release.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod __bench {
+    use crate::{ClientContext, Fingerprint, IpInfo, fingerprint::UaCache};
+
+    /// Fingerprint capture through the guard's User-Agent cache.
+    #[derive(Debug)]
+    pub struct CachedCapture(UaCache);
+
+    impl CachedCapture {
+        /// A cache holding up to `capacity` parsed User-Agents.
+        pub fn new(capacity: usize) -> Self {
+            Self(UaCache::new(capacity))
+        }
+
+        /// [`Fingerprint::capture`], parsing the User-Agent through the cache.
+        pub fn capture(&self, ctx: &ClientContext, info: IpInfo) -> Fingerprint {
+            Fingerprint::capture_cached(ctx, info, &self.0)
+        }
+    }
+}
+
 #[cfg(feature = "axum")]
 #[cfg_attr(docsrs, doc(cfg(feature = "axum")))]
 pub use crate::axum::{GuardLayer, GuardService};
@@ -89,6 +113,9 @@ pub use guard::{
     SessionInfo, StepUpOutcome,
 };
 pub use intel::{IpInfo, IpIntel, NoIpIntel};
+#[cfg(feature = "maxmind")]
+#[cfg_attr(docsrs, doc(cfg(feature = "maxmind")))]
+pub use intel::{MaxMindDatabase, MaxMindError, MaxMindIntel};
 pub use risk::{Assessment, assess};
 #[cfg(feature = "postgres")]
 #[cfg_attr(docsrs, doc(cfg(feature = "postgres")))]
