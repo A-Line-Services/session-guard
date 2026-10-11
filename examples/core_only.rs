@@ -5,7 +5,7 @@
 //! clock, so ten minutes pass instantly, and prints what the guard decides at each step.
 //!
 //! ```text
-//! cargo run --example core_only
+//! cargo run -p examples --bin core_only
 //! ```
 
 use std::{net::IpAddr, time::Duration};

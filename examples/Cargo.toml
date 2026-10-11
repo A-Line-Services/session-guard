@@ -1,0 +1,45 @@
+[package]
+name = "examples"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Example apps for session-guard."
+# The binaries sit next to this file, not in `src/`.
+autobins = false
+
+[dependencies]
+session-guard = { path = "..", features = ["aide", "postgres", "valkey"] }
+axum = { version = "0.8.9", features = ["macros"] }
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
+rovo = { version = "0.4.11", features = ["swagger"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.152"
+sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio"] }
+tokio = { version = "1.53.2", features = ["full"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.28.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+http-body-util = "0.1.5"
+tower = { version = "0.5.3", features = ["util"] }
+
+[[bin]]
+name = "core_only"
+path = "core_only.rs"
+
+[[bin]]
+name = "axum_memory"
+path = "axum_memory.rs"
+
+[[bin]]
+name = "axum_postgres"
+path = "axum_postgres.rs"
+
+[[bin]]
+name = "axum_valkey"
+path = "axum_valkey.rs"
+
+[lints]
+workspace = true

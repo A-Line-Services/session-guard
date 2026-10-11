@@ -10,6 +10,7 @@ documentation = "https://docs.rs/session-guard"
 readme = "README.md"
 keywords = ["session", "authentication", "security", "axum", "cookie"]
 categories = ["authentication", "web-programming", "web-programming::http-server"]
+autoexamples = false
 include = ["build.rs", "src/**/*", "migrations/**/*", "README.md", "CHANGELOG.md", "LICENSE-MIT", "LICENSE-APACHE"]
 
 [features]
@@ -72,22 +73,10 @@ rovo = { version = "0.4.11", features = ["swagger"] }
 testcontainers = { version = "0.28.0", features = ["reusable-containers"] }
 tokio = { version = "1.53.2", features = ["full", "test-util"] }
 tower = { version = "0.5.3", features = ["util"] }
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [[bench]]
 name = "authenticate"
 harness = false
-
-[[example]]
-name = "core_only"
-
-[[example]]
-name = "axum_postgres"
-required-features = ["axum", "postgres"]
-
-[[example]]
-name = "axum_valkey"
-required-features = ["axum", "valkey"]
 
 [[test]]
 name = "postgres"
@@ -109,11 +98,18 @@ required-features = ["axum"]
 name = "e2e"
 required-features = ["axum", "postgres", "valkey"]
 
-[lints.rust]
+[lints]
+workspace = true
+
+[workspace]
+members = ["examples"]
+exclude = ["fuzz"]
+
+[workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 must_use_candidate = "allow"

@@ -943,6 +943,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "examples"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "http-body-util",
+ "rovo",
+ "serde",
+ "serde_json",
+ "session-guard",
+ "sqlx",
+ "tokio",
+ "tower",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2717,6 +2735,7 @@ dependencies = [
 name = "session-guard"
 version = "0.1.0"
 dependencies = [
+ "aide",
  "arc-swap",
  "axum",
  "base64 0.23.1",
@@ -2747,7 +2766,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
- "tracing-subscriber",
  "uuid",
  "woothee",
  "zeroize",

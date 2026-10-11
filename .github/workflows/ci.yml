@@ -36,7 +36,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo clippy --all-targets --no-default-features -- -D warnings
 
   doc:
@@ -73,13 +73,16 @@ jobs:
         run: cargo test --doc --all-features
       - name: Build examples
         if: matrix.toolchain == 'stable'
-        run: cargo build --examples --all-features
+        run: cargo build -p examples
+      - name: Example tests
+        if: matrix.toolchain == 'stable'
+        run: cargo test -p examples
       # Tests need Docker services, so the MSRV row only compiles everything
       # (library, tests, examples, benches) and the library without features.
       - name: Check MSRV
         if: matrix.toolchain != 'stable'
         run: |
-          cargo check --all-features --all-targets
+          cargo check --workspace --all-features --all-targets
           cargo check --no-default-features --lib
 
   integration:

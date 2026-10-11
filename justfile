@@ -8,6 +8,7 @@ default:
 # Unit, property, doc and in-memory store tests (no Docker needed).
 test:
     cargo nextest run --features axum,maxmind,metrics,testing
+    cargo nextest run -p examples
     cargo test --doc --all-features
 
 # Everything, including Postgres/Valkey stores and e2e via testcontainers (needs Docker).
@@ -40,7 +41,7 @@ fmt:
 
 lint:
     cargo fmt --all -- --check
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo clippy --all-targets --no-default-features -- -D warnings
 
 doc:
@@ -72,7 +73,7 @@ outdated:
     cargo upgrade --dry-run --incompatible
 
 msrv:
-    cargo +1.94 check --all-features --all-targets
+    cargo +1.94 check --workspace --all-features --all-targets
 
 semver:
     cargo semver-checks
@@ -81,4 +82,4 @@ semver:
 ci: lint test doc-stable hack
 
 examples:
-    cargo build --examples --all-features
+    cargo build -p examples
