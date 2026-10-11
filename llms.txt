@@ -60,7 +60,7 @@ Production stores: `PgStore::migrated(pool).await?` (runs embedded migrations, s
 ## Key concepts
 
 - `Guard::new(store)` uses `GuardConfig::default()`. `Guard::builder(store, config)` sets `.subject::<T>()`, `.ip_intel(..)`, `.on_event(..)` and `.clock(..)`, then `.build()`.
-- `GuardConfig::builder()...build()` returns `Result<GuardConfig, ConfigError>`: `mode`, `step_up_policy`, `checks`, `thresholds`, `rotation`, `session_lifetime`, `idle_timeout`, `cookie`, `token_prefix`, `trusted_proxies` (returns a `Result`), `tls_fingerprint_header`, `minimize_event_ip`.
+- `GuardConfig::builder()...build()` returns `Result<GuardConfig, ConfigError>`: `mode`, `step_up_policy`, `checks`, `thresholds`, `rotation`, `session_lifetime`, `idle_timeout`, `cookie`, `cookie_name`, `token_prefix`, `trusted_proxies` (returns a `Result`), `tls_fingerprint_header`, `max_header_len`, `ping_pong_window`, `last_seen_write_interval`, `event_retention`, `minimize_event_ip`, `shadow_dedup_window`.
 - Rotation: a token older than `rotation.interval` (10 min) gets a new `Set-Cookie`; the old one stays valid for `grace` (30 s). A superseded token whose successor was used is reuse and revokes the session, even in shadow mode.
 - Risk: weighted checks (`Check`, `Checks::default()`, `Checks::none()`, `Checks::strict()`); score below 40 allows, 40 to 79 is step-up, 80 or more revokes (`Thresholds`). Per route: `guard.layer().with(Checks::strict())`.
 - `StepUpPolicy`: `Require` (default; reject with `step_up_required` until the app calls `complete_step_up`), `Revoke` or `Allow`.
