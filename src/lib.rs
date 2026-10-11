@@ -69,6 +69,30 @@ mod telemetry;
 pub mod testing;
 pub mod token;
 
+/// Internals the crate's own benchmarks measure. Not part of the public API; may change in any
+/// release.
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod __bench {
+    use crate::{ClientContext, Fingerprint, IpInfo, fingerprint::UaCache};
+
+    /// Fingerprint capture through the guard's User-Agent cache.
+    #[derive(Debug)]
+    pub struct CachedCapture(UaCache);
+
+    impl CachedCapture {
+        /// A cache holding up to `capacity` parsed User-Agents.
+        pub fn new(capacity: usize) -> Self {
+            Self(UaCache::new(capacity))
+        }
+
+        /// [`Fingerprint::capture`], parsing the User-Agent through the cache.
+        pub fn capture(&self, ctx: &ClientContext, info: IpInfo) -> Fingerprint {
+            Fingerprint::capture_cached(ctx, info, &self.0)
+        }
+    }
+}
+
 pub use checks::{Check, Checks, Decision, Thresholds, UnknownCheck};
 pub use client::{ClientContext, HeaderSource, canonical_ip, resolve_client_ip};
 pub use clock::{Clock, ManualClock, SystemClock};
