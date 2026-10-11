@@ -27,6 +27,7 @@ pub enum Mode {
 
 /// What a step-up decision (score between the step-up and revoke thresholds) does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum StepUpPolicy {
     /// Reject with `step_up_required` until the app re-verifies the subject and calls
     /// [`Guard::complete_step_up`](crate::Guard::complete_step_up).
