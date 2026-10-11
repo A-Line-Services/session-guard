@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-10-11
+
+### Chores
+
+- chore(deps): bump actions/upload-artifact from 6 to 7 ([#1](https://github.com/A-Line-Services/session-guard/pull/1)) by @dependabot[bot]
+- chore(deps): bump actions/create-github-app-token from 2 to 3 ([#2](https://github.com/A-Line-Services/session-guard/pull/2)) by @dependabot[bot]
+- chore(deps): bump actions/checkout from 6 to 7 ([#3](https://github.com/A-Line-Services/session-guard/pull/3)) by @dependabot[bot]
+
 ## [0.1.0] - 2026-10-11
 
 Initial release.
