@@ -18,11 +18,12 @@ Recipes live in the [`justfile`](justfile) (run `just` to list them):
 | `just test-postgres` / `just test-valkey` / `just e2e` | One store suite or the end-to-end HTTP tests. Need Docker. |
 | `just test-clean` | Removes the Docker containers the store and e2e tests share. |
 | `just lint`     | `rustfmt --check` and clippy on all and no features.                |
-| `just hack`     | `cargo hack` over the feature powerset.                             |
+| `just hack`     | `cargo hack` over every pair of features.                           |
 | `just fuzz`     | Fuzz a target, e.g. `just fuzz cookie 60` (nightly + `cargo-fuzz`). |
 | `just deny` / `just audit` | Supply chain checks.                                     |
 | `just doc-stable` / `just examples` / `just msrv` | Rustdoc with `-D warnings`, build the examples, check on Rust 1.94. |
-| `just ci`       | Roughly what CI runs: lint, test, docs and the feature powerset.    |
+| `just llms`     | Regenerates `llms-full.txt` after editing `llms.txt`, the README or the examples (CI checks it). |
+| `just ci`       | Roughly what CI runs: lint, test, docs, feature pairs and the `llms-full.txt` check. |
 
 ### Docker for store tests
 

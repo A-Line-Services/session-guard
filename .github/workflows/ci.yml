@@ -26,6 +26,8 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all --check
+      - name: Check llms-full.txt is up to date
+        run: ./scripts/gen-llms-full.sh --check
 
   clippy:
     name: clippy

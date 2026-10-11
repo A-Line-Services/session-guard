@@ -79,7 +79,15 @@ semver:
     cargo semver-checks
 
 # What CI runs.
-ci: lint test doc-stable hack
+ci: lint test doc-stable hack llms-check
 
 examples:
     cargo build -p examples
+
+# Regenerate llms-full.txt from llms.txt, the README and the examples.
+llms:
+    ./scripts/gen-llms-full.sh
+
+# Check that llms-full.txt is up to date.
+llms-check:
+    ./scripts/gen-llms-full.sh --check

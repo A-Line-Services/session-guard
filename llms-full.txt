@@ -1,0 +1,1654 @@
+# session-guard
+
+> session-guard makes stolen session cookies useless in Rust web apps. A `Guard` issues opaque session tokens, stores only their SHA-256 hashes, rotates them every 10 minutes and revokes the session when a superseded token comes back after its successor was used (a copied cookie). Every request is also scored against the session's client fingerprint: a moderate change asks the app to re-verify the user (step-up), a drastic one revokes. It ships an axum layer and extractors, Postgres and Valkey stores, MaxMind IP intelligence and aide/rovo OpenAPI support.
+
+session-guard manages sessions only. The app owns login, password verification, rate limiting, session caps and any per-session data (key it by `session_id`). There are no auth routes, and a session holds no payload: only an opaque subject `S: Subject` (`Uuid` by default; anything serializable, comparable and cloneable, stored as JSON).
+
+## Setup
+
+```toml
+[dependencies]
+session-guard = { version = "0.1", features = ["axum", "postgres"] }
+# other features: "valkey", "maxmind", "metrics", "aide" (OpenAPI via aide and rovo), "tokio", "testing"
+```
+
+No feature is enabled by default. `MemoryStore` is always available and meant for tests. `axum` enables `tokio`, and `aide` enables `axum`.
+
+## Minimal axum app
+
+```rust
+use std::net::SocketAddr;
+
+use axum::{Router, routing::{get, post}};
+use session_guard::{AuthSession, Guard, GuardError, MemoryStore, NewSession, Sessions, axum::LoggedOut};
+use uuid::Uuid;
+
+// Protected: the layer answers 401 before this runs if the session is missing or rejected.
+async fn me(session: AuthSession<Uuid>) -> String {
+    format!("signed in as {}", session.subject)
+}
+
+// Outside the layer. Verify the credentials and rate limit first, then ask for a session.
+async fn login(sessions: Sessions<MemoryStore>) -> Result<(NewSession, &'static str), GuardError> {
+    let user = Uuid::new_v4(); // the verified user id
+    Ok((sessions.login(&user).await?, "welcome")) // `NewSession` sets the cookie
+}
+
+async fn logout(sessions: Sessions<MemoryStore>) -> Result<(LoggedOut, &'static str), GuardError> {
+    Ok((sessions.logout().await?, "signed out")) // `LoggedOut` deletes the cookie
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let guard = Guard::new(MemoryStore::new());
+    let app = Router::new()
+        .route("/me", get(me))
+        .layer(guard.layer()) // wraps only the routes added before it
+        .route("/login", post(login))
+        .route("/logout", post(logout))
+        .with_state(guard);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+    // The layer needs the peer address; without it, it fails closed with a 500.
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    Ok(())
+}
+```
+
+Production stores: `PgStore::migrated(pool).await?` (runs embedded migrations, safe from many processes; or `PgStore::migrator()` and `PgStore::new(pool)`) and `ValkeyStore` (a single primary, no Cluster). Call `guard.spawn_purge(every)` or `guard.purge_expired()` periodically.
+
+## Key concepts
+
+- `Guard::new(store)` uses `GuardConfig::default()`. `Guard::builder(store, config)` sets `.subject::<T>()`, `.ip_intel(..)`, `.on_event(..)` and `.clock(..)`, then `.build()`.
+- `GuardConfig::builder()...build()` returns `Result<GuardConfig, ConfigError>`: `mode`, `step_up_policy`, `checks`, `thresholds`, `rotation`, `session_lifetime`, `idle_timeout`, `cookie`, `token_prefix`, `trusted_proxies` (returns a `Result`), `tls_fingerprint_header`, `minimize_event_ip`.
+- Rotation: a token older than `rotation.interval` (10 min) gets a new `Set-Cookie`; the old one stays valid for `grace` (30 s). A superseded token whose successor was used is reuse and revokes the session, even in shadow mode.
+- Risk: weighted checks (`Check`, `Checks::default()`, `Checks::none()`, `Checks::strict()`); score below 40 allows, 40 to 79 is step-up, 80 or more revokes (`Thresholds`). Per route: `guard.layer().with(Checks::strict())`.
+- `StepUpPolicy`: `Require` (default; reject with `step_up_required` until the app calls `complete_step_up`), `Revoke` or `Allow`.
+- Step-up: after the app re-verified the user, `sessions.complete_step_up(&verified_subject).await` returns `Result<IssuedToken, StepUpError>` (or `guard.complete_step_up(token, &ctx, &subject)` returning `StepUpOutcome`). It trusts the subject you pass.
+- Recent auth on sensitive routes: `guard.layer().require_recent_auth(Duration::from_secs(300))`. A zero window can never be met; confirm single actions in the handler instead.
+- `Mode::Shadow` records decisions as unenforced events and lets requests pass; roll out in shadow, then `Mode::Enforce`.
+- The 401 contract: JSON `{"error": ...}` with `not_authenticated`, `session_expired`, `session_revoked` (also `Clear-Site-Data`) or `step_up_required` (cookie kept). Store failures are 500 `{"error":"internal"}`. Frontends treat `step_up_required` as "re-verify, then retry" and every other code as "signed out".
+- Cookie: `__Host-sid`, `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`. Customise with `CookieConfig::named(..)`; `build()` validates prefixes and attributes.
+- API keys on the same routes: `token_prefix("sess_")` plus `guard.layer().bypass_bearer_prefixes(["pat_"])` or `.bypass_when(|headers| ..)`; bypassed requests reach the handler untouched.
+- Reverse proxies: list them in `trusted_proxies`, or `X-Forwarded-For` is ignored.
+- OpenAPI (`aide` feature): `AuthSession` marks routes with the `session_cookie` scheme; register it with `api.security_scheme(SECURITY_SCHEME, session_guard::aide::security_scheme(&guard))`.
+- Without a framework: `guard.login(&subject, &ctx, None)`, `guard.authenticate(token, &ctx)` returning `Outcome::Authenticated(auth)` (send `auth.rotated` as `Set-Cookie` when present) or `Outcome::Rejected(rejection)`.
+- Custom stores implement `SessionStore` and run `session_guard::store_conformance!(|| async { .. })` with the `testing` feature.
+
+## Common mistakes
+
+- Adding protected routes after `.layer(guard.layer())`: axum layers only wrap the routes added before them, so those routes are not authenticated and `AuthSession` always answers 401 there.
+- Putting `login` behind the layer: an anonymous request never reaches it. Use the `Sessions` extractor on routes outside the layer.
+- Serving without `into_make_service_with_connect_info::<SocketAddr>()`: every request answers 500.
+- Testing on plain-HTTP localhost with the default `__Host-` `Secure` cookie: browsers drop it. Use `CookieConfig::named("sid").secure(false)` for local development only.
+- Calling `complete_step_up` before your own verification succeeded, or skipping rate limits on login and step-up endpoints: the guard does neither.
+- Storing per-session data in the session: there is no payload. Key app data by `session_id`.
+- A subject type with nondeterministic serialization (such as `HashMap`): stores find a subject's sessions (`list_sessions`, `revoke_all_for_subject`) by comparing its JSON.
+- Running behind a proxy without `trusted_proxies`: every client gets the proxy's IP.
+
+## Docs
+
+- [Full reference](https://raw.githubusercontent.com/A-Line-Services/session-guard/main/llms-full.txt): this file plus the README and the examples in one document
+- [README](https://raw.githubusercontent.com/A-Line-Services/session-guard/main/README.md): how it works, risk checks, the 401 contract, cookies, proxies, tuning, threat model
+- [API docs](https://docs.rs/session-guard): rustdoc for `Guard`, `GuardConfig`, the `axum` and `aide` modules and the stores
+
+## Examples
+
+- [axum_simple](https://raw.githubusercontent.com/A-Line-Services/session-guard/main/examples/axum_simple.rs): login, a protected route and logout in one file
+- [core_only](https://raw.githubusercontent.com/A-Line-Services/session-guard/main/examples/core_only.rs): the guard without a framework
+- [app](https://github.com/A-Line-Services/session-guard/tree/main/examples/app): a complete axum and rovo app with step-up, session listing and revocation, a strict layer, an API key route and Swagger UI, run by `axum_memory`, `axum_postgres` and `axum_valkey`
+
+## Optional
+
+- [Threat model](https://github.com/A-Line-Services/session-guard#threat-model)
+- [Privacy and GDPR](https://github.com/A-Line-Services/session-guard#privacy-and-gdpr)
+- [Changelog](https://raw.githubusercontent.com/A-Line-Services/session-guard/main/CHANGELOG.md)
+
+---
+
+# README
+
+Stolen session cookies become useless: rotating tokens with reuse detection and risk-based step-up for Rust web apps.
+
+session-guard issues opaque session tokens, stores only their SHA-256 hashes and rotates them every few minutes.
+A superseded token that comes back after its successor was used is the signature of a copied cookie, and revokes the session.
+Every request is also scored against the session's client fingerprint; a moderate change asks the app to re-verify the user, a drastic one revokes.
+
+## How it works
+
+**Tokens.** A token is 32 random bytes from the OS RNG, encoded as unpadded base64url: 43 characters, plus the optional configured prefix.
+Only the SHA-256 hash is stored and compared (in constant time). Malformed tokens are rejected before the store is touched.
+
+**Rotation.** A request whose current token is older than 10 minutes gets a new token in a `Set-Cookie`.
+The old token stays valid for a 30 second grace period, so parallel requests do not fail.
+Rotation is race-safe: the store applies it atomically, and when two requests present the same token only the winner receives the new one.
+
+**Superseded tokens.** A token that was already replaced is classified as follows.
+
+| Outcome | When | Result |
+| --- | --- | --- |
+| Grace | Superseded less than the grace period ago | Accepted |
+| Orphaned | Superseded, and its successor was never presented (the reply was probably lost) | A fresh token is issued once, a `token_reissued` event is recorded; presenting it again counts as reuse |
+| Reuse | Superseded, and its successor was presented | Session revoked, a `token_reuse` event is recorded, `Rejection::Revoked` |
+
+Reuse is always enforced, even in shadow mode.
+
+**Risk scoring.** Each request is compared to the session's baseline. Every check that fires adds its weight to the score.
+
+| Check | Weight | Fires when |
+| --- | --- | --- |
+| `os_changed` | 80 | OS family changed |
+| `browser_changed` | 80 | Browser family changed |
+| `platform_hint_changed` | 80 | `Sec-CH-UA-Platform` changed to an incompatible platform |
+| `inconsistent_hints` | 60 | Platform hint contradicts the User-Agent's OS |
+| `browser_downgraded` | 50 | Same browser, lower major version |
+| `user_agent_missing` | 50 | User-Agent disappeared or lost its known browser or OS |
+| `mobile_hint_changed` | 50 | `Sec-CH-UA-Mobile` flipped |
+| `country_changed` | 40 | IP moved to another country (needs an `IpIntel` source) |
+| `client_hints_missing` | 30 | Hints the session used to send disappeared |
+| `tls_changed` | 30 | TLS fingerprint changed while the browser major version stayed the same |
+| `ip_ping_pong` | 25 | Returned to the previous network within 5 minutes of leaving it |
+| `asn_changed` | 20 | IP moved to another autonomous system (needs an `IpIntel` source) |
+| `accept_language_changed` | 15 | Preferred languages changed |
+| `ip_prefix_changed` | 10 | IP left its /24 (IPv4) or /48 (IPv6) |
+
+On an IP change exactly one of country, ASN or prefix fires (in that order); ping-pong can fire in addition.
+Android and Linux, and iOS and macOS, count as compatible operating systems.
+Missing data never bypasses a check: a value the baseline knows but the request lacks counts as a change.
+
+Thresholds: a score below 40 is allowed, 40 to 79 requires step-up, 80 or more revokes the session.
+
+**Baseline.** The browser, OS and client hints are fixed at login or step-up. The baseline only learns soft signals (network, country, ASN, languages, TLS, browser version), only those scored by the checks in use for that request (weight above zero), and only when the request was allowed.
+Completing a step-up resets the baseline to the current client.
+
+**Step-up policy.** `StepUpPolicy` decides what a step-up score does.
+
+| Policy | Effect |
+| --- | --- |
+| `Require` (default) | Requests are rejected with `step_up_required` until the app calls `complete_step_up` |
+| `Revoke` | A step-up score is treated as a revoke |
+| `Allow` | The request passes and an unenforced `step_up_required` event is recorded |
+
+**Shadow mode.** `Mode::Shadow` records every decision as an event with `enforced = false` and lets the request pass, so you can measure before enforcing. Reuse detection stays enforced.
+With several instances, unenforced events are deduplicated per session and kind, in process and through `SessionStore::claim_event` (window `shadow_dedup_window`, 10 minutes by default).
+
+## Quick start (axum and Postgres)
+
+```toml
+[dependencies]
+session-guard = { version = "0.1", features = ["axum", "postgres"] }
+```
+
+```rust,no_run
+use std::{net::SocketAddr, time::Duration};
+
+use axum::{Router, routing::{get, post}};
+use session_guard::{AuthSession, Guard, GuardError, NewSession, PgStore, Sessions};
+
+async fn me(session: AuthSession<uuid::Uuid>) -> String {
+    format!("session {} for {}", session.session_id, session.subject)
+}
+
+// Your own handler: verify the password and rate limit first, then ask the guard for a session.
+// `login` also revokes the session the request presented (fixation defence).
+async fn login(sessions: Sessions<PgStore>) -> Result<(NewSession, &'static str), GuardError> {
+    let user = uuid::Uuid::new_v4(); // the verified user id
+    Ok((sessions.login(&user).await?, "welcome"))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::PgPool::connect("postgres://localhost/app").await?;
+    let guard = Guard::new(PgStore::migrated(pool).await?);
+    let _purge = guard.spawn_purge(Duration::from_secs(600)); // deletes expired sessions and old events
+
+    let app = Router::new()
+        .route("/me", get(me))
+        .layer(guard.layer())
+        .route("/login", post(login))
+        .with_state(guard);
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    // The layer needs the peer address.
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    Ok(())
+}
+```
+
+`Guard::new` uses `GuardConfig::default()`. Use `Guard::builder(store, config)` to change the config, set a custom subject type (`.subject::<T>()`), an `IpIntel` source, an event hook (`.on_event`) or a clock.
+`PgStore::migrated` runs the embedded migrations and is safe to call from many processes. To run them in your own pipeline, use `PgStore::migrator()` and `PgStore::new(pool)` instead.
+Without `ConnectInfo<SocketAddr>` the layer fails closed with a 500.
+
+`Sessions` is the extractor for routes outside the layer: `login`, `logout` and `complete_step_up` for the session the request presented.
+`NewSession`, `IssuedToken` and `LoggedOut` are response parts that set or delete the cookie, and `GuardError` and `StepUpError` turn into the JSON error responses described in [the 401 contract](#the-401-contract).
+
+Without a framework, call the guard directly:
+
+```rust
+# async fn demo() -> Result<(), session_guard::GuardError> {
+use session_guard::{ClientContext, Guard, MemoryStore, Outcome};
+
+let guard = Guard::new(MemoryStore::new());
+let ctx = ClientContext::new("203.0.113.7".parse().unwrap()).with_user_agent("Mozilla/5.0");
+let user = uuid::Uuid::new_v4();
+
+let session = guard.login(&user, &ctx, None).await?;
+match guard.authenticate(session.token.expose(), &ctx).await? {
+    Outcome::Authenticated(auth) => {
+        assert_eq!(auth.session.subject, user);
+        // send `auth.rotated` as Set-Cookie when present
+    }
+    Outcome::Rejected(rejection) => {
+        // answer 401 with {"error": rejection.as_str()}
+        # let _ = rejection;
+    }
+}
+# Ok(())
+# }
+```
+
+### Examples
+
+The examples are a separate crate in the workspace, `examples`.
+[`examples/axum_simple.rs`](examples/axum_simple.rs) is the shortest start: login, a protected route and logout in one file (`cargo run -p examples --bin axum_simple`).
+
+[`examples/app/`](examples/app) is a complete app on axum and rovo: login, logout, step-up, session listing and revocation, a strict layer for a sensitive route, an API key route, and Swagger UI.
+Three binaries run it on different stores:
+
+```sh
+cargo run -p examples --bin axum_memory    # nothing to install
+cargo run -p examples --bin axum_postgres  # DATABASE_URL
+cargo run -p examples --bin axum_valkey    # VALKEY_URL
+```
+
+Then open <http://127.0.0.1:3000/swagger> and log in with `demo` / `demo-password`.
+[`examples/core_only.rs`](examples/core_only.rs) uses the guard without a framework (`cargo run -p examples --bin core_only`).
+
+## Feature flags
+
+| Feature | Enables |
+| --- | --- |
+| `axum` | Tower layer (`Guard::layer`), the `AuthSession` and `Sessions` extractors and response impls for axum 0.8; enables `tokio` |
+| `aide` | OpenAPI docs through aide and rovo: the `session_cookie` security scheme; enables `axum` |
+| `tokio` | `Guard::spawn_purge`, a background task that purges expired sessions |
+| `postgres` | `PgStore` on sqlx, with embedded migrations |
+| `valkey` | `ValkeyStore` for Valkey or Redis, with atomic Lua rotation (a single primary; Cluster mode is not supported) |
+| `maxmind` | `MaxMindIntel`: country and ASN from GeoLite2 / GeoIP2 databases |
+| `metrics` | Counters through the `metrics` facade |
+| `testing` | The `store_conformance!` suite and helpers for custom stores |
+
+No feature is enabled by default. `MemoryStore` is always available and meant for tests.
+
+## Scope
+
+session-guard manages sessions only. Your app owns login, password verification, rate limiting, session caps and any per-session payload.
+The subject is a generic opaque type `S: Subject` (anything serializable, comparable and cloneable; `Uuid` by default). It is stored as JSON, so use a deterministic serialization (no `HashMap`).
+There are no auth routes. A tower-sessions adapter and Valkey Cluster support are future work.
+
+**Your app MUST rate-limit its login and step-up endpoints.** The guard does not.
+
+## The 401 contract
+
+When a request is rejected the layer answers `401` with `Content-Type: application/json`, `Cache-Control: no-store` and one of these bodies.
+
+| `Rejection` | Body | Cookie | Meaning |
+| --- | --- | --- | --- |
+| `NotAuthenticated` | `{"error":"not_authenticated"}` | Cleared | No cookie, unknown token or token not accepted |
+| `Expired` | `{"error":"session_expired"}` | Cleared | Absolute or idle lifetime exceeded |
+| `Revoked` | `{"error":"session_revoked"}` | Cleared, plus `Clear-Site-Data: "cookies"` | Token reuse or risk revocation |
+| `StepUpRequired` | `{"error":"step_up_required"}` | Kept | The user must re-verify, then the app calls `complete_step_up` |
+
+Store failures answer `500` with `{"error":"internal"}`.
+Successful responses carry `Cache-Control: no-store` too, and a `Set-Cookie` when the token rotated.
+
+A frontend should treat `step_up_required` as "show the re-verification prompt, then retry" and every other code as "signed out: go to login".
+
+After the user re-verified, complete the step-up with the verified subject. A subject mismatch changes nothing.
+
+```rust,no_run
+# use session_guard::{ClientContext, Guard, MemoryStore, StepUpOutcome};
+# async fn demo(guard: Guard<MemoryStore>, token: &str, ctx: ClientContext, user: uuid::Uuid) -> Result<(), session_guard::GuardError> {
+match guard.complete_step_up(token, &ctx, &user).await? {
+    StepUpOutcome::Completed(new_token) => { /* send new_token.set_cookie() */ let _ = new_token; }
+    StepUpOutcome::SubjectMismatch | StepUpOutcome::Rejected(_) => { /* 401 */ }
+}
+# Ok(())
+# }
+```
+
+`complete_step_up` trusts the subject you pass, so call it only after your own verification succeeded. A session waiting for step-up keeps aging: if the idle timeout passes first, it expires and the user logs in again.
+
+To demand a recent proof of identity on sensitive routes, use `guard.layer().require_recent_auth(Duration::from_secs(300))`; older sessions get `step_up_required` with the cookie kept.
+A zero window can never be met, since the retry after a step-up is already later; to confirm each action (such as a delete), verify the credential in that handler instead.
+
+## Cookie format
+
+The default cookie is `__Host-sid`: `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, no `Domain`, and `Max-Age` taken from the session's remaining lifetime on the guard's clock.
+
+```rust
+use session_guard::CookieConfig;
+
+let line = CookieConfig::default().set_cookie("TOKEN", 2_592_000);
+assert_eq!(line, "__Host-sid=TOKEN; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=Lax");
+```
+
+Customise with `CookieConfig`:
+
+```rust
+use session_guard::{CookieConfig, GuardConfig, SameSite};
+
+let config = GuardConfig::builder()
+    .cookie(CookieConfig::named("__Secure-app").same_site(SameSite::Strict).path("/app"))
+    .build()
+    .unwrap();
+# let _ = config;
+```
+
+`build()` validates the cookie: the name must be a valid HTTP token, the path must start with `/` and contain no `;`, the domain must not be empty or contain `;`, `__Host-` requires `Secure`, no `Domain` and `Path=/`, `__Secure-` requires `Secure`, and `SameSite=None` requires `Secure`.
+`persistent(false)` omits `Max-Age` (a session cookie).
+
+## Token prefixes and API keys
+
+A prefix makes tokens recognisable in logs and secret scanners. Tokens without it are rejected before the store is hit.
+
+```rust
+use session_guard::GuardConfig;
+
+let config = GuardConfig::builder().token_prefix("sess_").build().unwrap();
+assert_eq!(config.token_prefix(), Some("sess_"));
+```
+
+If the same endpoints also accept API keys, tell the layer which requests to leave alone. Bypassed requests reach the inner service untouched (no `AuthSession`, no headers added) and your app authenticates them.
+
+```rust,no_run
+# use session_guard::{Guard, MemoryStore};
+# let guard = Guard::new(MemoryStore::new());
+let layer = guard
+    .layer()
+    .bypass_bearer_prefixes(["pat_", "svc_"])
+    .bypass_when(|headers| headers.contains_key("x-api-key"));
+# let _ = layer;
+```
+
+## OpenAPI (aide and rovo)
+
+With the `aide` feature the extractors and errors document themselves:
+
+- `AuthSession` marks its route as requiring the `session_cookie` scheme and documents the layer's 401 rejections.
+- `Sessions` leaves the route public.
+- `GuardError` documents its 500, and `StepUpError` its 401, 403 and 500.
+
+Add the scheme itself in `finish_api_with`: `session_guard::aide::security_scheme(&guard)` is an `apiKey` in the cookie, named after the guard's cookie, registered under `SECURITY_SCHEME`.
+With rovo, name other schemes with `@security` in the handler's metadata, and register them the same way.
+
+```rust
+use rovo::{Router, aide::openapi::OpenApi, routing::get, rovo};
+use session_guard::{
+    AuthSession, Guard, MemoryStore,
+    aide::{SECURITY_SCHEME, security_scheme},
+};
+use uuid::Uuid;
+
+/// The signed-in user.
+///
+/// # Responses
+///
+/// 200: String - The subject
+#[rovo]
+async fn me(session: AuthSession<Uuid>) -> String {
+    session.subject.to_string()
+}
+
+/// Ping with an API key; the layer bypasses it (see `bypass_bearer_prefixes`).
+///
+/// # Responses
+///
+/// 200: String - Pong
+///
+/// # Metadata
+///
+/// @security bearer
+#[rovo]
+async fn ping() -> String {
+    "pong".to_owned()
+}
+
+let guard = Guard::new(MemoryStore::new());
+let mut api = OpenApi::default();
+let app: axum::Router = Router::new()
+    .route("/me", get(me))
+    .route("/api/ping", get(ping))
+    .into_inner()
+    .layer(guard.layer().bypass_bearer_prefixes(["pat_"]))
+    .finish_api_with(&mut api, |api| {
+        api.title("My API")
+            .security_scheme(SECURITY_SCHEME, security_scheme(&guard))
+        // .security_scheme("bearer", ..) for `@security bearer`
+    });
+// Serve `api` with rovo's Swagger UI.
+# let _ = app;
+```
+
+`examples/app/` shows the whole setup, including Swagger UI and a separate strict layer for sensitive routes.
+
+## Reverse proxies
+
+Behind a proxy the peer address is the proxy. List your proxies so the guard can read the client address from `X-Forwarded-For`.
+
+```rust
+use session_guard::GuardConfig;
+
+let config = GuardConfig::builder()
+    .trusted_proxies(["10.0.0.0/8", "192.168.1.5"])
+    .unwrap()
+    .tls_fingerprint_header("X-TLS-Fingerprint")
+    .max_header_len(512)
+    .build()
+    .unwrap();
+# let _ = config;
+```
+
+`X-Forwarded-For` is honoured only when the direct peer is a trusted proxy. The chain is walked right to left, skipping trusted hops; the first untrusted address is the client. A malformed hop stops the walk and falls back to the peer.
+If `X-Forwarded-For` arrives while no trusted proxies are configured, a warning is logged once.
+Header values are read from the first occurrence, trimmed and truncated to `max_header_len` (default 512).
+
+Make the edge proxy overwrite the header rather than trust the client's.
+
+```nginx
+# nginx, directly facing clients
+proxy_set_header X-Forwarded-For $remote_addr;
+# the TLS fingerprint comes from your fingerprinting module; this overwrites any client value
+proxy_set_header X-TLS-Fingerprint $your_tls_fingerprint_variable;
+```
+
+```caddyfile
+# Caddy: reverse_proxy replaces X-Forwarded-For from untrusted clients by default
+example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+```yaml
+# Traefik static configuration: only trust forwarded headers from your own load balancer
+entryPoints:
+  websecure:
+    address: ":443"
+    forwardedHeaders:
+      trustedIPs: ["10.0.0.0/8"]
+```
+
+`tls_fingerprint_header` names a header set by your TLS terminator. The value is opaque; a change while the browser version is the same fires `tls_changed`.
+
+## Threat model
+
+Defended:
+
+- Cookie theft (an infostealer, or XSS exfiltration) with the cookie replayed from another machine: rotation, reuse detection and client fingerprint checks.
+- Session fixation: `login` revokes the session presented with the request.
+
+Not defended:
+
+- An attacker on the same device or browser.
+- Real-time proxying through the victim's browser.
+- XSS acting inside the victim's page.
+
+**Orphan reissue.** If a superseded token's successor was never presented, the guard assumes the response was lost and rotates again instead of revoking. This gives the presenter a fresh token without proof that it is the legitimate client, so a thief who replays an orphaned token first gets a working session. The fingerprint checks still apply to that request. Each orphan is reissued only once: the fresh token counts as used from the start, so presenting the orphan again is reuse and revokes the session. A client that loses two rotation responses in a row is logged out.
+
+### CSRF
+
+`SameSite=Lax` is not full CSRF protection. Use CSRF tokens or `Origin` checks on state-changing requests.
+
+## Tuning
+
+```rust
+use std::time::Duration;
+
+use session_guard::{Check, Checks, GuardConfig, Mode, RotationConfig, Thresholds};
+
+let config = GuardConfig::builder()
+    .mode(Mode::Shadow)
+    .checks(Checks::default().weight(Check::AsnChanged, 40).disable(Check::AcceptLanguageChanged))
+    .thresholds(Thresholds { step_up: 40, revoke: 80 })
+    .rotation(RotationConfig {
+        interval: Duration::from_secs(300),
+        grace: Duration::from_secs(20),
+        reuse_detection: Duration::from_secs(7 * 24 * 3600),
+    })
+    .session_lifetime(Duration::from_secs(14 * 24 * 3600))
+    .idle_timeout(Duration::from_secs(3 * 24 * 3600))
+    .last_seen_write_interval(Duration::from_secs(60))
+    .build()
+    .unwrap();
+# let _ = config;
+```
+
+Presets: `Checks::default()`, `Checks::none()` (only rotation and reuse detection) and `Checks::strict()` (IP prefix, ASN, language, TLS and ping-pong at 40, country change at 80).
+Apply a different set per route with `guard.layer().with(Checks::strict())`.
+
+| Setting | Default |
+| --- | --- |
+| `session_lifetime` | 30 days |
+| `idle_timeout` | 7 days |
+| `rotation.interval` / `grace` / `reuse_detection` | 10 minutes / 30 seconds / 7 days |
+| `ping_pong_window` | 5 minutes (zero disables) |
+| `last_seen_write_interval` | 60 seconds (zero writes on every request) |
+| `thresholds` | step-up 40, revoke 80 |
+
+`grace` must be shorter than `interval`. `last_seen_write_interval` limits store writes on the hot path.
+Roll out in shadow mode first: watch the events, tune weights, then switch to `Mode::Enforce`.
+
+## Privacy and GDPR
+
+Stored per session: the subject, timestamps, the token hashes and a fingerprint baseline (IP prefix, country, ASN, browser, OS, client hints, languages, TLS fingerprint).
+Events additionally store the client IP and a truncated User-Agent.
+Events are kept for 90 days (`event_retention`); `guard.purge_expired()` deletes expired sessions and old events and returns a `PurgeReport`. Call it periodically, or let `guard.spawn_purge(every)` (`tokio` feature) do it.
+`minimize_event_ip(true)` masks event IPs to /24 (IPv4) or /48 (IPv6).
+You, as the controller, decide the legal basis, the retention you configure, and how data subjects' requests are handled (`list_sessions`, `revoke_all_for_subject`).
+
+## MaxMind
+
+Enable `maxmind` and give the guard an `IpIntel` source. Without one, IP changes are judged by network prefix only.
+
+```rust,no_run
+use std::sync::Arc;
+
+use session_guard::{Guard, GuardConfig, MaxMindIntel, MemoryStore};
+
+let country = "/var/lib/GeoIP/GeoLite2-Country.mmdb";
+let asn = "/var/lib/GeoIP/GeoLite2-ASN.mmdb";
+let intel = Arc::new(MaxMindIntel::open(country, Some(asn)).unwrap());
+
+// The guard shares the source; keep the handle to reload it.
+let guard = Guard::builder(MemoryStore::new(), GuardConfig::default())
+    .ip_intel(Arc::clone(&intel))
+    .build();
+
+// After geoipupdate, swap the databases without a restart; lookups stay lock-free.
+intel.reload(country, Some(asn)).unwrap();
+# let _ = guard;
+```
+
+If you never reload, pass the `MaxMindIntel` itself to `ip_intel`. Any closure `Fn(IpAddr) -> IpInfo`, and any `Arc` of an `IpIntel`, is an `IpIntel`.
+
+## Performance
+
+Criterion medians with the in-memory store (`just bench` reproduces them):
+
+| Operation | Median |
+| --- | --- |
+| `authenticate`, hot path | 3.17 µs |
+| `authenticate` with rotation | 5.68 µs |
+| `login` | 7.38 µs |
+| Risk assessment | 557 ns |
+| User-Agent parse, uncached / cached | 4.65 µs / 1.14 µs |
+| `TokenHash::of` | 228 ns |
+| `TokenHash::from_presented` | 418 ns |
+
+A real store adds its own round trip.
+
+## Custom stores
+
+Implement `SessionStore` (the guard holds all security logic; a store persists records and applies updates atomically), then run the conformance suite with the `testing` feature and `tokio` as a dev-dependency.
+
+```rust,ignore
+session_guard::store_conformance!(|| async { MyStore::connect("...").await.unwrap() });
+```
+
+## MSRV
+
+Rust 1.94 (edition 2024).
+
+
+---
+
+# examples/axum_simple.rs
+
+```rust
+//! The smallest axum app with session-guard: log in, see who you are, log out.
+//!
+//! ```sh
+//! cargo run -p examples --bin axum_simple
+//!
+//! curl -i -c jar -H 'content-type: application/json' \
+//!   -d '{"username":"demo","password":"demo-password"}' http://127.0.0.1:3000/login
+//! curl -b jar http://127.0.0.1:3000/me
+//! curl -i -b jar -X POST http://127.0.0.1:3000/logout
+//! ```
+//!
+//! For OpenAPI, step-up, API keys and the Postgres and Valkey stores, see `axum_memory`.
+
+use std::net::SocketAddr;
+
+use axum::{
+    Json, Router,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use serde::Deserialize;
+use session_guard::{
+    AuthSession, ConfigError, CookieConfig, Guard, GuardConfig, GuardError, MemoryStore, Sessions, axum::LoggedOut,
+};
+use uuid::Uuid;
+
+const DEMO_USER: Uuid = Uuid::from_u128(1);
+
+#[derive(Deserialize)]
+struct Credentials {
+    username: String,
+    password: String,
+}
+
+async fn login(sessions: Sessions<MemoryStore>, Json(creds): Json<Credentials>) -> Response {
+    // A real app checks a password hash here and rate limits attempts.
+    if creds.username != "demo" || creds.password != "demo-password" {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match sessions.login(&DEMO_USER).await {
+        // `NewSession` sets the session cookie.
+        Ok(session) => (session, "signed in\n").into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+/// Only reachable with a valid session: the layer answers 401 otherwise.
+async fn me(session: AuthSession<Uuid>) -> String {
+    format!("signed in as {}\n", session.subject)
+}
+
+async fn logout(sessions: Sessions<MemoryStore>) -> Result<(LoggedOut, &'static str), GuardError> {
+    // `LoggedOut` deletes the cookie.
+    Ok((sessions.logout().await?, "signed out\n"))
+}
+
+fn guard() -> Result<Guard<MemoryStore>, ConfigError> {
+    let config = GuardConfig::builder()
+        // Plain-HTTP localhost needs a non-`Secure` cookie. In production keep the default
+        // (`__Host-sid`, `Secure`) and serve over HTTPS.
+        .cookie(CookieConfig::named("sid").secure(false))
+        .build()?;
+    Ok(Guard::builder(MemoryStore::new(), config).build())
+}
+
+fn app(guard: Guard<MemoryStore>) -> Router {
+    Router::new()
+        .route("/me", get(me))
+        // The layer wraps only the routes added before it.
+        .layer(guard.layer())
+        .route("/login", post(login))
+        .route("/logout", post(logout))
+        .with_state(guard)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::init();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+    println!("listening on http://{}", listener.local_addr()?);
+    // The layer needs the peer address.
+    let service = app(guard()?).into_make_service_with_connect_info::<SocketAddr>();
+    axum::serve(listener, service).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        extract::ConnectInfo,
+        http::{Request, header},
+    };
+    use tower::ServiceExt;
+
+    use super::*;
+
+    async fn send(app: &Router, method: &str, path: &str, cookie: Option<&str>, body: &str) -> Response {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(cookie) = cookie {
+            req = req.header(header::COOKIE, cookie);
+        }
+        let mut req = req.body(Body::from(body.to_owned())).unwrap();
+        // `into_make_service_with_connect_info` sets this in `main`.
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4000))));
+        app.clone().oneshot(req).await.unwrap()
+    }
+
+    /// The `name=value` part of the response's `Set-Cookie`.
+    fn cookie(response: &Response) -> String {
+        let set_cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        set_cookie.split(';').next().unwrap().to_owned()
+    }
+
+    const DEMO: &str = r#"{"username":"demo","password":"demo-password"}"#;
+
+    #[tokio::test]
+    async fn login_me_logout() {
+        let app = app(guard().unwrap());
+
+        let anonymous = send(&app, "GET", "/me", None, "").await;
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+        let login = send(&app, "POST", "/login", None, DEMO).await;
+        assert_eq!(login.status(), StatusCode::OK);
+        let session = cookie(&login);
+
+        let me = send(&app, "GET", "/me", Some(&session), "").await;
+        assert_eq!(me.status(), StatusCode::OK);
+
+        let logout = send(&app, "POST", "/logout", Some(&session), "").await;
+        assert_eq!(logout.status(), StatusCode::OK);
+        let after = send(&app, "GET", "/me", Some(&session), "").await;
+        assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn wrong_password_gets_no_session() {
+        let app = app(guard().unwrap());
+        let body = r#"{"username":"demo","password":"guess"}"#;
+        let login = send(&app, "POST", "/login", None, body).await;
+        assert_eq!(login.status(), StatusCode::UNAUTHORIZED);
+        assert!(login.headers().get(header::SET_COOKIE).is_none());
+    }
+}
+```
+
+---
+
+# examples/core_only.rs
+
+```rust
+//! session-guard without any web framework.
+//!
+//! The core crate only needs a [`ClientContext`] (who is calling) and a token (the cookie
+//! value). This example plays a browser and an attacker against an in-memory store with a manual
+//! clock, so ten minutes pass instantly, and prints what the guard decides at each step.
+//!
+//! ```text
+//! cargo run -p examples --bin core_only
+//! ```
+
+use std::{net::IpAddr, time::Duration};
+
+use chrono::{TimeZone, Utc};
+use session_guard::{
+    ClientContext, Guard, GuardConfig, IpInfo, ManualClock, MemoryStore, Outcome, Rejection, SessionEvent,
+    StepUpOutcome,
+};
+use uuid::Uuid;
+
+const CHROME_WINDOWS: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+/// Prints what an `Outcome` means for the app's response.
+fn describe(outcome: &Outcome<Uuid>) -> String {
+    match outcome {
+        Outcome::Authenticated(auth) if auth.rotated.is_some() => {
+            "authenticated, send the rotated token as a new cookie".to_owned()
+        }
+        Outcome::Authenticated(_) => "authenticated".to_owned(),
+        Outcome::Rejected(rejection) => format!("rejected: 401 {}", rejection.as_str()),
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A manual clock lets the example skip time. Production code uses the default system clock.
+    let clock = ManualClock::new(Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap());
+
+    let guard = Guard::builder(MemoryStore::new(), GuardConfig::builder().build()?)
+        // Country lookup, so that changing country is a risk signal. Use `MaxMindIntel` in
+        // production (feature `maxmind`).
+        .ip_intel(|ip: IpAddr| {
+            let country = if ip.to_string().starts_with("198.51.100.") {
+                "DE"
+            } else {
+                "US"
+            };
+            IpInfo::new(Some(country.into()), None)
+        })
+        // Every security decision arrives here: log it, count it, or ship it to a SIEM.
+        .on_event(|event: &SessionEvent| {
+            println!("    event: {} (enforced: {})", event.kind.as_str(), event.enforced);
+        })
+        .clock(clock.clone())
+        .build();
+
+    // What your web framework would build from each request.
+    let home = ClientContext::new("203.0.113.7".parse()?).with_user_agent(CHROME_WINDOWS);
+    let abroad = ClientContext::new("198.51.100.20".parse()?).with_user_agent(CHROME_WINDOWS);
+
+    // The app verified the password (the crate does not), so the user is known.
+    let user = Uuid::new_v4();
+
+    println!("1. Login");
+    let session = guard.login(&user, &home, None).await?;
+    let first = session.token.expose().to_owned();
+    println!(
+        "   session {} created, cookie header: {}",
+        session.session_id,
+        session.token.set_cookie()
+    );
+
+    println!("2. Request right after login");
+    let outcome = guard.authenticate(&first, &home).await?;
+    println!("   {}", describe(&outcome));
+    assert!(matches!(&outcome, Outcome::Authenticated(a) if a.rotated.is_none()));
+
+    println!("3. Request 11 minutes later (tokens rotate every 10)");
+    clock.advance(Duration::from_mins(11));
+    let Outcome::Authenticated(auth) = guard.authenticate(&first, &home).await? else {
+        return Err("expected the session to survive".into());
+    };
+    let second = auth.rotated.ok_or("expected a rotated token")?.expose().to_owned();
+    println!("   authenticated, rotated to a new token; the old one is superseded");
+
+    println!("4. The browser uses the new token, then an attacker replays the copied old one");
+    let outcome = guard.authenticate(&second, &home).await?;
+    println!("   browser: {}", describe(&outcome));
+    assert!(matches!(outcome, Outcome::Authenticated(_)));
+    clock.advance(Duration::from_mins(1)); // past the 30 second grace window
+    let outcome = guard.authenticate(&first, &abroad).await?;
+    println!("   attacker: {}", describe(&outcome));
+    assert!(matches!(outcome, Outcome::Rejected(Rejection::Revoked)));
+    let outcome = guard.authenticate(&second, &home).await?;
+    println!("   browser again: {} (the whole session is gone)", describe(&outcome));
+    assert!(matches!(
+        outcome,
+        Outcome::Rejected(Rejection::NotAuthenticated | Rejection::Revoked)
+    ));
+
+    println!("5. Log in again, then the same cookie shows up from another country");
+    let session = guard.login(&user, &home, None).await?;
+    let token = session.token.expose().to_owned();
+    let outcome = guard.authenticate(&token, &abroad).await?;
+    println!("   {}", describe(&outcome));
+    assert!(matches!(outcome, Outcome::Rejected(Rejection::StepUpRequired)));
+
+    println!("6. The app re-verifies the user (password, passkey, MFA), then completes the step-up");
+    // `user` is whoever the app just re-verified. A different subject is refused.
+    let StepUpOutcome::Completed(fresh) = guard.complete_step_up(&token, &abroad, &user).await? else {
+        return Err("expected the step-up to complete".into());
+    };
+    println!("   completed, new cookie header: {}", fresh.set_cookie());
+    let outcome = guard.authenticate(fresh.expose(), &abroad).await?;
+    println!("   {}", describe(&outcome));
+    assert!(matches!(outcome, Outcome::Authenticated(_)));
+
+    println!("7. Logout");
+    guard.logout(fresh.expose(), &abroad).await?;
+    let outcome = guard.authenticate(fresh.expose(), &abroad).await?;
+    println!("   {}", describe(&outcome));
+    assert!(matches!(
+        outcome,
+        Outcome::Rejected(Rejection::NotAuthenticated | Rejection::Revoked)
+    ));
+
+    Ok(())
+}
+```
+
+---
+
+# examples/axum_memory.rs
+
+```rust
+//! A session-guard app on axum and rovo, with the in-memory store: nothing to install.
+//!
+//! ```text
+//! cargo run -p examples --bin axum_memory
+//! ```
+//!
+//! Then open <http://127.0.0.1:3000/swagger> and log in with `demo` / `demo-password`.
+//! Sessions are lost on restart; `axum_postgres` and `axum_valkey` run the same app on a real
+//! store.
+//!
+//! Environment:
+//!
+//! * `LISTEN`: address to bind, default `127.0.0.1:3000`
+//!
+//! The app itself is in `app/`, shared by the three examples.
+
+#[path = "app/mod.rs"]
+mod app;
+#[cfg(test)]
+#[path = "app/tests.rs"]
+mod tests;
+
+/// The store behind every session. `app/` uses this alias, so it is the only line that changes
+/// between the examples.
+type Store = session_guard::MemoryStore;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    app::init_tracing();
+    app::serve(Store::new()).await
+}
+```
+
+---
+
+# examples/app/mod.rs
+
+```rust
+//! The HTTP app shared by the `axum_memory`, `axum_postgres` and `axum_valkey` examples.
+//!
+//! Each binary defines `type Store`; everything here is written against that alias.
+//!
+//! * [`config`]: the session-guard wiring (configuration and the two layers).
+//! * [`routes`]: which handler sits behind which layer.
+//! * [`handlers`]: the endpoints, documented for rovo by their doc comments.
+//! * [`users`]: the credential and API key checks. These are your app's job, not the guard's.
+//! * [`models`], [`errors`], [`state`]: request and response types, and what handlers share.
+
+pub mod config;
+pub mod errors;
+pub mod handlers;
+pub mod models;
+pub mod routes;
+pub mod state;
+pub mod users;
+
+use std::net::SocketAddr;
+
+use rovo::aide::{
+    axum::ApiRouter,
+    openapi::{OpenApi, SecurityScheme},
+};
+use session_guard::{
+    Guard,
+    aide::{SECURITY_SCHEME, security_scheme},
+};
+use tracing_subscriber::EnvFilter;
+
+use self::state::AppState;
+use crate::Store;
+
+/// Builds the whole app, ready for `into_make_service_with_connect_info::<SocketAddr>()`
+/// (the layer needs the peer address).
+pub fn router(guard: &Guard<Store>) -> axum::Router {
+    let mut api = OpenApi::default();
+    // A layer wraps only the routes merged before it, so each group gets its own.
+    let app = ApiRouter::new()
+        .merge(routes::public().into_inner())
+        .merge(routes::account().into_inner().layer(config::layer(guard)))
+        .merge(routes::sensitive().into_inner().layer(config::sensitive_layer(guard)))
+        .finish_api_with(&mut api, |api| {
+            api.title("session-guard example")
+                .description("Log in with demo / demo-password.")
+                // The schemes the routes' security requirements refer to.
+                .security_scheme(SECURITY_SCHEME, security_scheme(guard))
+                .security_scheme("bearer", bearer_scheme())
+        })
+        .with_state(AppState { guard: guard.clone() });
+
+    let docs = rovo::Router::new().with_oas(api).with_swagger("/swagger").finish();
+    app.merge(docs)
+}
+
+/// The scheme behind `@security bearer`: an API key the app checks itself.
+#[expect(clippy::default_trait_access, reason = "aide does not re-export IndexMap")]
+fn bearer_scheme() -> SecurityScheme {
+    SecurityScheme::Http {
+        scheme: "bearer".to_owned(),
+        bearer_format: None,
+        description: Some("API key (`pat_…` or `svc_…`), checked by the app.".to_owned()),
+        extensions: Default::default(),
+    }
+}
+
+/// Logs to stdout, filtered by `RUST_LOG` (default `info`). Call it first in `main`, so the
+/// store's connection logs show up too.
+pub fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .init();
+}
+
+/// Runs the app on `LISTEN` (default `127.0.0.1:3000`) until it stops.
+///
+/// # Errors
+///
+/// Configuration errors, or failing to bind or serve.
+pub async fn serve(store: Store) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let guard = config::guard(store)?;
+    // Deletes expired sessions and old events. Safe to run on every instance.
+    let _purge = guard.spawn_purge(config::PURGE_EVERY);
+
+    let listen = std::env::var("LISTEN").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
+    let listener = tokio::net::TcpListener::bind(&listen).await?;
+    let addr = listener.local_addr()?;
+    println!("listening on http://{addr}");
+    println!("swagger UI:  http://{addr}/swagger");
+    println!("log in:      curl -i -c jar -H 'content-type: application/json' \\");
+    println!("               -d '{{\"username\":\"demo\",\"password\":\"demo-password\"}}' http://{addr}/login");
+
+    axum::serve(
+        listener,
+        router(&guard).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
+    Ok(())
+}
+```
+
+---
+
+# examples/app/config.rs
+
+```rust
+//! The session-guard wiring: configuration, the guard and its layers.
+
+use std::time::Duration;
+
+use session_guard::{Checks, ConfigError, CookieConfig, Guard, GuardBuilder, GuardConfig, GuardLayer};
+use uuid::Uuid;
+
+use crate::Store;
+
+/// How recent a login must be for the sensitive routes.
+pub const RECENT_AUTH: Duration = Duration::from_mins(15);
+
+/// How often expired sessions and old events are deleted.
+pub const PURGE_EVERY: Duration = Duration::from_mins(10);
+
+/// The guard configuration.
+///
+/// # Errors
+///
+/// [`ConfigError`] for an invalid proxy range or cookie.
+pub fn config() -> Result<GuardConfig, ConfigError> {
+    GuardConfig::builder()
+        // Plain-HTTP localhost needs a non-`Secure`, non-`__Host-` cookie. In production keep
+        // the default (`__Host-sid`, `Secure`) and serve over HTTPS.
+        .cookie(CookieConfig::named("sid").secure(false))
+        // Only these proxies may set `X-Forwarded-For`. Without any, the TCP peer is the
+        // client, which is right when nothing sits in front of the app.
+        .trusted_proxies(["10.0.0.0/8", "172.16.0.0/12"])?
+        // A recognizable prefix lets secret scanners find leaked session tokens.
+        .token_prefix("sess_")
+        .build()
+}
+
+/// The guard builder, before the clock and IP intelligence (tests set those).
+///
+/// # Errors
+///
+/// [`ConfigError`] from [`config`].
+pub fn builder(store: Store) -> Result<GuardBuilder<Store>, ConfigError> {
+    Ok(Guard::builder(store, config()?))
+}
+
+/// The finished guard.
+///
+/// Add `.ip_intel(MaxMindIntel::open(..))` (feature `maxmind`) for country and ASN signals,
+/// and `.on_event(..)` to ship security events to your logs or SIEM.
+///
+/// # Errors
+///
+/// [`ConfigError`] from [`config`].
+pub fn guard(store: Store) -> Result<Guard<Store>, ConfigError> {
+    Ok(builder(store)?.build())
+}
+
+/// The layer for ordinary signed-in routes.
+///
+/// API keys with these prefixes belong to an app-side handler, so the guard lets them
+/// through untouched (they get no `AuthSession`).
+pub fn layer(guard: &Guard<Store>) -> GuardLayer<Store, Uuid> {
+    guard.layer().bypass_bearer_prefixes(["pat_", "svc_"])
+}
+
+/// The layer for sensitive routes: strict risk checks, and a login no older than
+/// [`RECENT_AUTH`]. Failing either gives 401 `step_up_required`, with the cookie kept.
+pub fn sensitive_layer(guard: &Guard<Store>) -> GuardLayer<Store, Uuid> {
+    guard.layer().with(Checks::strict()).require_recent_auth(RECENT_AUTH)
+}
+```
+
+---
+
+# examples/app/state.rs
+
+```rust
+//! What every handler can reach.
+
+use axum::extract::FromRef;
+use session_guard::Guard;
+
+use crate::Store;
+
+/// The app state: the guard, and in a real app your database pool and so on.
+///
+/// `FromRef` lets the `Sessions` extractor take the guard out of it.
+#[derive(Clone, FromRef)]
+pub struct AppState {
+    /// The session guard.
+    pub guard: Guard<Store>,
+}
+```
+
+---
+
+# examples/app/models.rs
+
+```rust
+//! Request and response bodies.
+
+use rovo::schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use session_guard::SessionInfo;
+use uuid::Uuid;
+
+/// What the client sends to log in, and again to step up.
+#[derive(Deserialize, JsonSchema)]
+pub struct Credentials {
+    /// Account name.
+    pub username: String,
+    /// Account password.
+    pub password: String,
+}
+
+/// An error response body.
+#[derive(Serialize, JsonSchema)]
+pub struct ErrorBody {
+    /// Machine-readable error code.
+    pub error: String,
+}
+
+/// The session that was just created.
+#[derive(Serialize, JsonSchema)]
+pub struct LoggedIn {
+    /// The new session's id.
+    pub session_id: Uuid,
+}
+
+/// Acknowledgement of an action.
+#[derive(Serialize, JsonSchema)]
+pub struct Done {
+    /// Always `true`.
+    pub ok: bool,
+}
+
+/// Who is signed in.
+#[derive(Serialize, JsonSchema)]
+pub struct Me {
+    /// The session's subject, the id passed to `login`.
+    pub subject: Uuid,
+    /// This session's id.
+    pub session_id: Uuid,
+    /// When the user last proved who they are (login or step-up), RFC 3339.
+    pub authenticated_at: String,
+    /// When the session expires, RFC 3339.
+    pub expires_at: String,
+}
+
+/// One of the user's sessions ("your devices").
+#[derive(Serialize, JsonSchema)]
+pub struct SessionView {
+    /// Session id, what `DELETE /sessions/{id}` takes.
+    pub session_id: Uuid,
+    /// Whether this is the session making the request.
+    pub current: bool,
+    /// When it was created, RFC 3339.
+    pub created_at: String,
+    /// When it was last seen, RFC 3339.
+    pub last_seen_at: String,
+    /// Browser family, if known.
+    pub browser: Option<String>,
+    /// Operating system family, if known.
+    pub os: Option<String>,
+    /// Country, if an IP intelligence source is configured.
+    pub country: Option<String>,
+}
+
+impl SessionView {
+    /// The view of `info`, as seen from the session `current`.
+    pub fn new(info: SessionInfo<Uuid>, current: Uuid) -> Self {
+        Self {
+            session_id: info.session_id,
+            current: info.session_id == current,
+            created_at: info.created_at.to_rfc3339(),
+            last_seen_at: info.last_seen_at.to_rfc3339(),
+            browser: info.browser,
+            os: info.os,
+            country: info.country,
+        }
+    }
+}
+
+/// The outcome of the sensitive action.
+#[derive(Serialize, JsonSchema)]
+pub struct Transferred {
+    /// Always `transferred`.
+    pub status: String,
+}
+
+/// Which credential an API request used.
+#[derive(Serialize, JsonSchema)]
+pub struct Pong {
+    /// Always `api_key`.
+    pub auth: String,
+}
+```
+
+---
+
+# examples/app/users.rs
+
+```rust
+//! The credential and API key checks: your app's job, not session-guard's.
+
+use axum::http::{HeaderMap, header};
+use uuid::Uuid;
+
+use super::models::Credentials;
+
+/// The one demo user. Replace this with your user table.
+pub const DEMO_USER: Uuid = Uuid::from_u128(1);
+const DEMO_USERNAME: &str = "demo";
+const DEMO_PASSWORD: &str = "demo-password";
+
+/// An API key the app accepts, standing in for your key lookup.
+const DEMO_API_KEY: &str = "pat_demo-key";
+
+/// Toy credential check against a hardcoded user.
+///
+/// Replace with your real authentication (password hash, SSO, passkey, ...), and
+/// rate-limit every route that calls it. session-guard does neither.
+pub fn verify(credentials: &Credentials) -> Option<Uuid> {
+    (credentials.username == DEMO_USERNAME && credentials.password == DEMO_PASSWORD).then_some(DEMO_USER)
+}
+
+/// Whether the request carries a valid API key as its bearer token. Look keys up in your own
+/// table instead.
+pub fn has_api_key(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        == Some(DEMO_API_KEY)
+}
+```
+
+---
+
+# examples/app/routes.rs
+
+```rust
+//! Which handler sits behind which layer. `mod.rs` applies the layers per group.
+
+use rovo::routing::{delete, get, post};
+
+use super::{
+    handlers::{account, api, auth, transfer},
+    state::AppState,
+};
+
+/// Routes that need no session: log in, log out and step up.
+///
+/// Step-up must stay outside the layer that answers `step_up_required`, or it could never be
+/// reached.
+pub fn public() -> rovo::Router<AppState> {
+    rovo::Router::<AppState>::new()
+        .route("/login", post(auth::login))
+        .route("/logout", post(auth::logout))
+        .route("/step-up", post(auth::step_up))
+}
+
+/// Routes for signed-in users (or API keys), behind the standard layer.
+pub fn account() -> rovo::Router<AppState> {
+    rovo::Router::<AppState>::new()
+        .route("/me", get(account::me))
+        .route("/sessions", get(account::list_sessions))
+        .route("/sessions/{id}", delete(account::revoke_session))
+        .route("/api/ping", get(api::ping))
+}
+
+/// Routes that need a recent, low-risk login, behind the strict layer.
+pub fn sensitive() -> rovo::Router<AppState> {
+    rovo::Router::<AppState>::new().route("/transfer", post(transfer::transfer))
+}
+```
+
+---
+
+# examples/app/handlers/auth.rs
+
+```rust
+//! Logging in and out, and stepping up.
+
+use rovo::{extract::State, response::Json, rovo};
+use session_guard::{GuardError, IssuedToken, NewSession, Sessions, axum::LoggedOut};
+
+use crate::{
+    Store,
+    app::{
+        errors::AppError,
+        models::{Credentials, Done, ErrorBody, LoggedIn},
+        state::AppState,
+        users::verify,
+    },
+};
+
+/// Log in.
+///
+/// Checks the credentials, then asks session-guard for a session and sets its cookie. A
+/// session the client already holds is revoked first, which defeats session fixation.
+///
+/// # Responses
+///
+/// 200: Json<LoggedIn> - Logged in; the session cookie is set
+/// 401: Json<ErrorBody> - Wrong username or password
+/// 500: Json<ErrorBody> - Internal error
+///
+/// # Metadata
+///
+/// @tag auth
+#[rovo]
+pub async fn login(
+    State(_): State<AppState>,
+    sessions: Sessions<Store>,
+    Json(credentials): Json<Credentials>,
+) -> Result<(NewSession, Json<LoggedIn>), AppError> {
+    // Your job: check who this is (and rate-limit this route).
+    let user = verify(&credentials).ok_or(AppError::InvalidCredentials)?;
+    // The guard's job: create the session.
+    let session = sessions.login(&user).await?;
+    let session_id = session.session_id;
+    Ok((session, Json(LoggedIn { session_id })))
+}
+
+/// Log out.
+///
+/// Deletes the session behind the cookie and clears the cookie. It sits outside the layers,
+/// so it also works for a session that is waiting for step-up.
+///
+/// # Responses
+///
+/// 200: Json<Done> - Logged out; the cookie is cleared
+/// 500: Json<ErrorBody> - Internal error
+///
+/// # Metadata
+///
+/// @tag auth
+#[rovo]
+pub async fn logout(
+    State(_): State<AppState>,
+    sessions: Sessions<Store>,
+) -> Result<(LoggedOut, Json<Done>), GuardError> {
+    Ok((sessions.logout().await?, Json(Done { ok: true })))
+}
+
+/// Step up.
+///
+/// The answer to a 401 `step_up_required`. The user proves who they are again (here with the
+/// password, in your app a passkey or MFA), then session-guard marks the session trusted from
+/// the current client and issues a fresh token.
+///
+/// # Responses
+///
+/// 200: Json<Done> - Trusted again; the new cookie is set
+/// 401: Json<ErrorBody> - Wrong credentials, or no valid session
+/// 403: Json<ErrorBody> - The credentials belong to a different user
+/// 500: Json<ErrorBody> - Internal error
+///
+/// # Metadata
+///
+/// @tag auth
+#[rovo]
+pub async fn step_up(
+    State(_): State<AppState>,
+    sessions: Sessions<Store>,
+    Json(credentials): Json<Credentials>,
+) -> Result<(IssuedToken, Json<Done>), AppError> {
+    // Your job: re-verify the user (and rate-limit this route).
+    let user = verify(&credentials).ok_or(AppError::InvalidCredentials)?;
+    // The guard's job: refuse unless the verified user owns this session.
+    let token = sessions.complete_step_up(&user).await?;
+    Ok((token, Json(Done { ok: true })))
+}
+```
+
+---
+
+# examples/app/handlers/account.rs
+
+```rust
+//! The signed-in user and their sessions.
+
+use rovo::{
+    extract::{Path, State},
+    response::Json,
+    rovo,
+};
+use session_guard::AuthSession;
+use uuid::Uuid;
+
+use crate::app::{
+    errors::AppError,
+    models::{Done, ErrorBody, Me, SessionView},
+    state::AppState,
+};
+
+/// The signed-in user.
+///
+/// `AuthSession` is the session the layer authenticated. Without a valid session this handler
+/// is never reached: the extractor answers 401 `not_authenticated`.
+///
+/// # Responses
+///
+/// 200: Json<Me> - The current session
+///
+/// # Metadata
+///
+/// @tag account
+#[rovo]
+pub async fn me(State(_): State<AppState>, session: AuthSession<Uuid>) -> Json<Me> {
+    Json(Me {
+        subject: session.subject,
+        session_id: session.session_id,
+        authenticated_at: session.authenticated_at.to_rfc3339(),
+        expires_at: session.expires_at.to_rfc3339(),
+    })
+}
+
+/// List the user's sessions.
+///
+/// # Responses
+///
+/// 200: Json<Vec<SessionView>> - Every live session of the signed-in user
+/// 500: Json<ErrorBody> - Internal error
+///
+/// # Metadata
+///
+/// @tag account
+#[rovo]
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    session: AuthSession<Uuid>,
+) -> Result<Json<Vec<SessionView>>, AppError> {
+    let sessions = state.guard.list_sessions(&session.subject).await?;
+    Ok(Json(
+        sessions
+            .into_iter()
+            .map(|info| SessionView::new(info, session.session_id))
+            .collect(),
+    ))
+}
+
+/// Revoke one of the user's sessions.
+///
+/// # Path Parameters
+///
+/// id: The session to revoke
+///
+/// # Responses
+///
+/// 200: Json<Done> - The session is gone
+/// 404: Json<ErrorBody> - The user has no such session
+/// 500: Json<ErrorBody> - Internal error
+///
+/// # Metadata
+///
+/// @tag account
+#[rovo]
+pub async fn revoke_session(
+    State(state): State<AppState>,
+    session: AuthSession<Uuid>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Done>, AppError> {
+    // `revoke_session` takes any id, so check ownership first: otherwise a user could revoke
+    // someone else's session.
+    let sessions = state.guard.list_sessions(&session.subject).await?;
+    if !sessions.iter().any(|s| s.session_id == id) {
+        return Err(AppError::NotFound);
+    }
+    state.guard.revoke_session(id).await?;
+    Ok(Json(Done { ok: true }))
+}
+```
+
+---
+
+# examples/app/handlers/transfer.rs
+
+```rust
+//! A sensitive action.
+
+use rovo::{extract::State, response::Json, rovo};
+use session_guard::AuthSession;
+use uuid::Uuid;
+
+use crate::app::{models::Transferred, state::AppState};
+
+/// A sensitive action.
+///
+/// This route sits behind the strict layer: a risky client or a login older than 15 minutes
+/// gets 401 `step_up_required` and must `POST /step-up` first.
+///
+/// # Responses
+///
+/// 200: Json<Transferred> - Done
+///
+/// # Metadata
+///
+/// @tag account
+#[rovo]
+pub async fn transfer(State(_): State<AppState>, _session: AuthSession<Uuid>) -> Json<Transferred> {
+    Json(Transferred {
+        status: "transferred".to_owned(),
+    })
+}
+```
+
+---
+
+# examples/app/handlers/api.rs
+
+```rust
+//! A route for API keys instead of sessions.
+
+use axum::http::HeaderMap;
+use rovo::{extract::State, response::Json, rovo};
+
+use crate::app::{
+    errors::AppError,
+    models::{ErrorBody, Pong},
+    state::AppState,
+    users::has_api_key,
+};
+
+/// Ping with an API key.
+///
+/// Keys starting with `pat_` or `svc_` skip session-guard entirely (see the layer's
+/// `bypass_bearer_prefixes`), so this handler is the only thing judging them.
+///
+/// # Responses
+///
+/// 200: Json<Pong> - The key is valid
+/// 401: Json<ErrorBody> - Unknown key
+///
+/// # Metadata
+///
+/// @tag api
+/// @security bearer
+#[rovo]
+pub async fn ping(State(_): State<AppState>, headers: HeaderMap) -> Result<Json<Pong>, AppError> {
+    if !has_api_key(&headers) {
+        return Err(AppError::InvalidApiKey);
+    }
+    Ok(Json(Pong {
+        auth: "api_key".to_owned(),
+    }))
+}
+```
+
+---
+
+# examples/app/errors.rs
+
+```rust
+//! The app's error type.
+
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
+use rovo::response::Json;
+use session_guard::{GuardError, axum::StepUpError};
+
+use super::models::ErrorBody;
+
+/// Everything a handler can fail with.
+///
+/// The guard's errors already know their responses (500, or the step-up's 401 and 403), so
+/// `?` on a guard call is all a handler needs.
+#[derive(Debug)]
+pub enum AppError {
+    /// Wrong username or password.
+    InvalidCredentials,
+    /// Unknown API key.
+    InvalidApiKey,
+    /// No such resource for this user.
+    NotFound,
+    /// The guard or its store failed.
+    Guard(GuardError),
+    /// Step-up was refused.
+    StepUp(StepUpError),
+}
+
+impl From<GuardError> for AppError {
+    fn from(error: GuardError) -> Self {
+        Self::Guard(error)
+    }
+}
+
+impl From<StepUpError> for AppError {
+    fn from(error: StepUpError) -> Self {
+        Self::StepUp(error)
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let (status, code) = match self {
+            Self::InvalidCredentials => (StatusCode::UNAUTHORIZED, "invalid_credentials"),
+            Self::InvalidApiKey => (StatusCode::UNAUTHORIZED, "invalid_api_key"),
+            Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+            Self::Guard(error) => return error.into_response(),
+            Self::StepUp(error) => return error.into_response(),
+        };
+        (status, Json(ErrorBody { error: code.to_owned() })).into_response()
+    }
+}
+
+/// The handlers list their error responses under `# Responses`.
+impl rovo::aide::OperationOutput for AppError {
+    type Inner = Self;
+}
+```
