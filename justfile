@@ -34,7 +34,7 @@ test-clean:
 
 # Build every feature combination.
 hack:
-    cargo hack check --feature-powerset --no-dev-deps
+    cargo hack check --feature-powerset --depth 2 --no-dev-deps
 
 fmt:
     cargo fmt --all

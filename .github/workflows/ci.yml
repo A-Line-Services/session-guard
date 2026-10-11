@@ -130,7 +130,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-hack
-      - run: cargo hack check --feature-powerset --no-dev-deps
+      # Every feature pair (43 builds) instead of the full powerset (256):
+      # features are additive, so wider combinations add little.
+      - run: cargo hack check --feature-powerset --depth 2 --no-dev-deps
 
   deny:
     name: cargo-deny
