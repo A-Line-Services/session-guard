@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use testcontainers::{
-    ContainerAsync, GenericImage, ImageExt, ReuseDirective,
+    ContainerAsync, ContainerRequest, GenericImage, ImageExt, ReuseDirective,
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
 };
@@ -20,11 +20,10 @@ pub const LABEL: &str = "session-guard.test";
 
 /// Starts (or joins) the shared container `name`. Processes racing to create it retry until
 /// the winner's container is visible.
-async fn shared(image: GenericImage, port: u16, name: &str) -> (String, u16) {
+async fn shared(image: impl Fn() -> ContainerRequest<GenericImage>, port: u16, name: &str) -> (String, u16) {
     let mut attempt = 0;
     let container: ContainerAsync<GenericImage> = loop {
-        let request = image
-            .clone()
+        let request = image()
             .with_container_name(name)
             .with_label(LABEL, "1")
             .with_reuse(ReuseDirective::Always);
@@ -47,11 +46,32 @@ async fn shared(image: GenericImage, port: u16, name: &str) -> (String, u16) {
 pub async fn valkey_url() -> &'static str {
     static URL: OnceCell<String> = OnceCell::const_new();
     URL.get_or_init(|| async {
-        let image = GenericImage::new("valkey/valkey", "8-alpine")
-            .with_exposed_port(6379.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"));
+        let image = || {
+            GenericImage::new("valkey/valkey", "8-alpine")
+                .with_exposed_port(6379.tcp())
+                .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+                .into()
+        };
         let (host, port) = shared(image, 6379, "session-guard-test-valkey").await;
         format!("redis://{host}:{port}")
+    })
+    .await
+}
+
+/// URL of the shared Postgres.
+pub async fn postgres_url() -> &'static str {
+    static URL: OnceCell<String> = OnceCell::const_new();
+    URL.get_or_init(|| async {
+        let image = || {
+            GenericImage::new("postgres", "18-alpine")
+                .with_exposed_port(5432.tcp())
+                .with_wait_for(WaitFor::message_on_stderr(
+                    "database system is ready to accept connections",
+                ))
+                .with_env_var("POSTGRES_PASSWORD", "postgres")
+        };
+        let (host, port) = shared(image, 5432, "session-guard-test-postgres").await;
+        format!("postgres://postgres:postgres@{host}:{port}/postgres")
     })
     .await
 }

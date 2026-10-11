@@ -526,14 +526,18 @@ pub async fn list_subject_sessions<St: SessionStore>(store: St) {
 /// Expired (absolute) and idle sessions are purged; live ones stay.
 pub async fn delete_expired_absolute_and_idle<St: SessionStore>(store: St) {
     // Far in the past, so these purges only reach rows at least that old: never the live rows
-    // of other tests or apps sharing the database.
+    // of other tests or apps sharing the database. Stores whose keys expire on the wall clock
+    // drop `expired` on their own, so only the idle session is sure to be counted; the others
+    // expire in real time.
     let base = far_past();
+    let later = Utc::now() + TimeDelta::days(1);
     let mut expired = sample_session(base);
     expired.expires_at = base;
     let mut idle = sample_session(base);
     idle.last_seen_at = base - secs(100);
+    idle.expires_at = later;
     let mut live = sample_session(base);
-    live.expires_at = base + secs(1);
+    live.expires_at = later;
     live.last_seen_at = base - secs(99);
 
     let (te, ti, tl) = (random_hash(), random_hash(), random_hash());
@@ -542,7 +546,7 @@ pub async fn delete_expired_absolute_and_idle<St: SessionStore>(store: St) {
     store.insert_session(&live, &tl).await.unwrap();
 
     let deleted = store.delete_expired(base, base - secs(100)).await.unwrap();
-    assert!(deleted >= 2);
+    assert!(deleted >= 1);
     assert!(store.find_by_token(&te).await.unwrap().is_none());
     assert!(store.find_by_token(&ti).await.unwrap().is_none());
     assert!(store.find_by_token(&tl).await.unwrap().is_some());
