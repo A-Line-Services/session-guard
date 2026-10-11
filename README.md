@@ -26,7 +26,7 @@ Rotation is race-safe: the store applies it atomically, and when two requests pr
 | Outcome | When | Result |
 | --- | --- | --- |
 | Grace | Superseded less than the grace period ago | Accepted |
-| Orphaned | Superseded, and its successor was never presented (the reply was probably lost) | A fresh token is issued once, a `token_reissued` event is recorded; presenting it again counts as reuse |
+| Orphaned | Superseded, and its successor was never presented (the reply was probably lost) | The request is scored with `orphaned_token`; if allowed, a fresh token is issued once and a `token_reissued` event is recorded; presenting it again counts as reuse. With `orphan_reissue_window` set, older orphans get `not_authenticated` |
 | Reuse | Superseded, and its successor was presented | Session revoked, a `token_reuse` event is recorded, `Rejection::Revoked` |
 
 Reuse is always enforced, even in shadow mode.
@@ -46,6 +46,7 @@ Reuse is always enforced, even in shadow mode.
 | `client_hints_missing` | 30 | Hints the session used to send disappeared |
 | `tls_changed` | 30 | TLS fingerprint changed while the browser major version stayed the same |
 | `ip_ping_pong` | 25 | Returned to the previous network within 5 minutes of leaving it |
+| `orphaned_token` | 25 | The token is orphaned: superseded, past the grace period, and its successor was never presented |
 | `asn_changed` | 20 | IP moved to another autonomous system (needs an `IpIntel` source) |
 | `accept_language_changed` | 15 | Preferred languages changed |
 | `ip_prefix_changed` | 10 | IP left its /24 (IPv4) or /48 (IPv6) |
@@ -55,6 +56,11 @@ Android and Linux, and iOS and macOS, count as compatible operating systems.
 Missing data never bypasses a check: a value the baseline knows but the request lacks counts as a change.
 
 Thresholds: a score below 40 is allowed, 40 to 79 requires step-up, 80 or more revokes the session.
+
+`orphaned_token` adds to the fingerprint score.
+An orphan from an unchanged client (25) or with only an IP prefix change (35) is reissued.
+An orphan with an ASN change (45), ping-pong (50) or a country change (65) requires step-up, and with an OS or browser change it revokes.
+It is not learned into the baseline.
 
 **Baseline.** The browser, OS and client hints are fixed at login or step-up. The baseline only learns soft signals (network, country, ASN, languages, TLS, browser version), only those scored by the checks in use for that request (weight above zero), and only when the request was allowed.
 Completing a step-up resets the baseline to the current client.
@@ -387,11 +393,31 @@ Not defended:
 - Real-time proxying through the victim's browser.
 - XSS acting inside the victim's page.
 
-**Orphan reissue.** If a superseded token's successor was never presented, the guard assumes the response was lost and rotates again instead of revoking. This gives the presenter a fresh token without proof that it is the legitimate client, so a thief who replays an orphaned token first gets a working session. The fingerprint checks still apply to that request. Each orphan is reissued only once: the fresh token counts as used from the start, so presenting the orphan again is reuse and revokes the session. A client that loses two rotation responses in a row is logged out.
+**Orphan reissue.** If a superseded token's successor was never presented, the guard assumes the response was lost and rotates again instead of revoking.
+This gives the presenter a fresh token without proof that it is the legitimate client.
+The request is scored with `orphaned_token` (25) on top of the fingerprint checks, so a thief who replays an orphan first only gets a session if its fingerprint matches closely enough to stay below 40.
+Each orphan is reissued only once: the fresh token counts as used from the start, so presenting the orphan again is reuse and revokes the session.
+The victim's next request presents a superseded token whose successor was used, which also revokes the session, so the thief's access lasts until the victim returns.
+`orphan_reissue_window` bounds how old a reissued orphan can be. Older orphans are rejected as `not_authenticated` and the session is left untouched, so whoever holds the successor keeps it.
+A zero window never reissues, so a client that loses a single rotation response is signed out.
+The cost of a window: a phone that lost a response while backgrounded and returns hours later is logged out.
+Without a window, a client that loses two rotation responses in a row is logged out.
 
 ### CSRF
 
-`SameSite=Lax` is not full CSRF protection. Use CSRF tokens or `Origin` checks on state-changing requests.
+session-guard does not protect against CSRF. That is the app's job, as with any cookie authentication.
+
+`SameSite=Lax` covers part of it: browsers do not send the cookie on cross-site `POST`, `PUT`, `PATCH` or `DELETE` requests.
+It leaves these gaps:
+
+- Same-site but cross-origin attackers: a sibling subdomain such as `evil.example.com` can still forge requests to `app.example.com`.
+- State-changing `GET` requests, which `Lax` sends cross-site on top-level navigation.
+- Login CSRF: the login route sits outside the layer.
+
+On every state-changing route, including login and step-up, reject unsafe-method requests whose `Sec-Fetch-Site` is not `same-origin` (or `none`).
+When the header is missing, compare `Origin` with your expected origin instead.
+CSRF tokens work as well.
+Requests the layer bypasses (API keys) carry no ambient credentials, so they do not need the check.
 
 ## Tuning
 
@@ -416,7 +442,7 @@ let config = GuardConfig::builder()
     .unwrap();
 ```
 
-Presets: `Checks::default()`, `Checks::none()` (only rotation and reuse detection) and `Checks::strict()` (IP prefix, ASN, language, TLS and ping-pong at 40, country change at 80).
+Presets: `Checks::default()`, `Checks::none()` (only rotation and reuse detection; no `orphaned_token`) and `Checks::strict()` (IP prefix, ASN, language, TLS, ping-pong and orphaned token at 40, country change at 80).
 Apply a different set per route with `guard.layer().with(Checks::strict())`.
 
 | Setting | Default |
@@ -427,6 +453,7 @@ Apply a different set per route with `guard.layer().with(Checks::strict())`.
 | `ping_pong_window` | 5 minutes (zero disables) |
 | `last_seen_write_interval` | 60 seconds (zero writes on every request) |
 | `thresholds` | step-up 40, revoke 80 |
+| `orphan_reissue_window` | off (orphans are reissued until `rotation.reuse_detection` prunes them; zero never reissues) |
 
 `grace` must be shorter than `interval`. `last_seen_write_interval` limits store writes on the hot path.
 Roll out in shadow mode first: watch the events, tune weights, then switch to `Mode::Enforce`.

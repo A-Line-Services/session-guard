@@ -60,8 +60,8 @@ Production stores: `PgStore::migrated(pool).await?` (runs embedded migrations, s
 ## Key concepts
 
 - `Guard::new(store)` uses `GuardConfig::default()`. `Guard::builder(store, config)` sets `.subject::<T>()`, `.ip_intel(..)`, `.on_event(..)` and `.clock(..)`, then `.build()`.
-- `GuardConfig::builder()...build()` returns `Result<GuardConfig, ConfigError>`: `mode`, `step_up_policy`, `checks`, `thresholds`, `rotation`, `session_lifetime`, `idle_timeout`, `cookie`, `cookie_name`, `token_prefix`, `trusted_proxies` (returns a `Result`), `tls_fingerprint_header`, `max_header_len`, `ping_pong_window`, `last_seen_write_interval`, `event_retention`, `minimize_event_ip`, `shadow_dedup_window`.
-- Rotation: a token older than `rotation.interval` (10 min) gets a new `Set-Cookie`; the old one stays valid for `grace` (30 s). A superseded token whose successor was used is reuse and revokes the session, even in shadow mode.
+- `GuardConfig::builder()...build()` returns `Result<GuardConfig, ConfigError>`: `mode`, `step_up_policy`, `checks`, `thresholds`, `rotation`, `session_lifetime`, `idle_timeout`, `cookie`, `cookie_name`, `token_prefix`, `trusted_proxies` (returns a `Result`), `tls_fingerprint_header`, `max_header_len`, `ping_pong_window`, `last_seen_write_interval`, `orphan_reissue_window`, `event_retention`, `minimize_event_ip`, `shadow_dedup_window`.
+- Rotation: a token older than `rotation.interval` (10 min) gets a new `Set-Cookie`; the old one stays valid for `grace` (30 s). A superseded token whose successor was used is reuse and revokes the session, even in shadow mode. An orphaned token (successor never presented) is reissued once and scored with `orphaned_token` (25); `orphan_reissue_window` optionally bounds its age.
 - Risk: weighted checks (`Check`, `Checks::default()`, `Checks::none()`, `Checks::strict()`); score below 40 allows, 40 to 79 is step-up, 80 or more revokes (`Thresholds`). Per route: `guard.layer().with(Checks::strict())`.
 - `StepUpPolicy`: `Require` (default; reject with `step_up_required` until the app calls `complete_step_up`), `Revoke` or `Allow`.
 - Step-up: after the app re-verified the user, `sessions.complete_step_up(&verified_subject).await` returns `Result<IssuedToken, StepUpError>` (or `guard.complete_step_up(token, &ctx, &subject)` returning `StepUpOutcome`). It trusts the subject you pass.
@@ -85,6 +85,7 @@ Production stores: `PgStore::migrated(pool).await?` (runs embedded migrations, s
 - Storing per-session data in the session: there is no payload. Key app data by `session_id`.
 - A subject type with nondeterministic serialization (such as `HashMap`): stores find a subject's sessions (`list_sessions`, `revoke_all_for_subject`) by comparing its JSON.
 - Running behind a proxy without `trusted_proxies`: every client gets the proxy's IP.
+- Assuming the guard handles CSRF: it does not. On unsafe methods, including login and step-up, reject requests whose `Sec-Fetch-Site` is not `same-origin` (or whose `Origin` is not yours when it is missing).
 
 ## Docs
 
