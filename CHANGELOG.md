@@ -53,6 +53,21 @@ Initial release.
   `Authorization: Bearer` token starts with a configured prefix (such as API
   keys handled by other middleware), and `bypass_when` takes any predicate over
   the headers. Bypassed requests get no authentication and no `AuthSession`.
+- `Sessions` axum extractor for routes outside the layer: `login`,
+  `logout` and `complete_step_up` for the session the request presented.
+  `NewSession`, `IssuedToken` and `LoggedOut` are response parts that set or
+  delete the cookie; `GuardError` and `StepUpError` convert into JSON error
+  responses.
+- OpenAPI support (`aide` feature, works with rovo): `AuthSession` adds the
+  `session_cookie` security requirement and documents its 401 rejections,
+  the error types document their responses, and `aide::security_scheme`
+  (or `aide::register`) adds the cookie scheme to the spec.
+- `Guard::spawn_purge` (`tokio` feature, enabled by `axum`): runs
+  `purge_expired` periodically in the background.
+- Examples (the `examples` workspace crate): `axum_simple`, a minimal app in
+  one file; one axum and rovo app (`examples/app/`) with Swagger UI, run on
+  the in-memory, Postgres and Valkey stores (`axum_memory`, `axum_postgres`,
+  `axum_valkey`); and `core_only` without a framework.
 - PostgreSQL store with embedded migrations (`postgres` feature).
 - Valkey / Redis store with atomic Lua rotation (`valkey` feature).
 - In-memory store for tests and single-process use.

@@ -78,40 +78,27 @@ session-guard = { version = "0.1", features = ["axum", "postgres"] }
 ```
 
 ```rust,no_run
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
-use axum::{
-    Router,
-    extract::{Request, State},
-    http::{StatusCode, header},
-    response::IntoResponse,
-    routing::{get, post},
-};
-use session_guard::{AuthSession, Guard, PgStore};
-
-type AppGuard = Guard<PgStore>;
+use axum::{Router, routing::{get, post}};
+use session_guard::{AuthSession, Guard, GuardError, NewSession, PgStore, Sessions};
 
 async fn me(session: AuthSession<uuid::Uuid>) -> String {
     format!("session {} for {}", session.session_id, session.subject)
 }
 
 // Your own handler: verify the password and rate limit first, then ask the guard for a session.
-async fn login(State(guard): State<AppGuard>, request: Request) -> Result<impl IntoResponse, StatusCode> {
-    let (parts, _body) = request.into_parts();
-    let ctx = session_guard::axum::client_context(&guard, &parts).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+// `login` also revokes the session the request presented (fixation defence).
+async fn login(sessions: Sessions<PgStore>) -> Result<(NewSession, &'static str), GuardError> {
     let user = uuid::Uuid::new_v4(); // the verified user id
-    let previous = guard.cookie_token(&parts.headers); // revokes the old session (fixation defence)
-    let session = guard
-        .login(&user, &ctx, previous.as_deref())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(([(header::SET_COOKIE, session.token.set_cookie().to_owned())], "welcome"))
+    Ok((sessions.login(&user).await?, "welcome"))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = sqlx::PgPool::connect("postgres://localhost/app").await?;
     let guard = Guard::new(PgStore::migrated(pool).await?);
+    let _purge = guard.spawn_purge(Duration::from_secs(600)); // deletes expired sessions and old events
 
     let app = Router::new()
         .route("/me", get(me))
@@ -129,6 +116,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `Guard::new` uses `GuardConfig::default()`. Use `Guard::builder(store, config)` to change the config, set a custom subject type (`.subject::<T>()`), an `IpIntel` source, an event hook (`.on_event`) or a clock.
 `PgStore::migrated` runs the embedded migrations and is safe to call from many processes. To run them in your own pipeline, use `PgStore::migrator()` and `PgStore::new(pool)` instead.
 Without `ConnectInfo<SocketAddr>` the layer fails closed with a 500.
+
+`Sessions` is the extractor for routes outside the layer: `login`, `logout` and `complete_step_up` for the session the request presented.
+`NewSession`, `IssuedToken` and `LoggedOut` are response parts that set or delete the cookie, and `GuardError` and `StepUpError` turn into the JSON error responses described in [the 401 contract](#the-401-contract).
 
 Without a framework, call the guard directly:
 
@@ -155,13 +145,30 @@ match guard.authenticate(session.token.expose(), &ctx).await? {
 # }
 ```
 
-Complete examples: [`examples/axum_postgres.rs`](examples/axum_postgres.rs), [`examples/axum_valkey.rs`](examples/axum_valkey.rs), [`examples/core_only.rs`](examples/core_only.rs).
+### Examples
+
+The examples are a separate crate in the workspace, `examples`.
+[`examples/axum_simple.rs`](examples/axum_simple.rs) is the shortest start: login, a protected route and logout in one file (`cargo run -p examples --bin axum_simple`).
+
+[`examples/app/`](examples/app) is a complete app on axum and rovo: login, logout, step-up, session listing and revocation, a strict layer for a sensitive route, an API key route, and Swagger UI.
+Three binaries run it on different stores:
+
+```sh
+cargo run -p examples --bin axum_memory    # nothing to install
+cargo run -p examples --bin axum_postgres  # DATABASE_URL
+cargo run -p examples --bin axum_valkey    # VALKEY_URL
+```
+
+Then open <http://127.0.0.1:3000/swagger> and log in with `demo` / `demo-password`.
+[`examples/core_only.rs`](examples/core_only.rs) uses the guard without a framework (`cargo run -p examples --bin core_only`).
 
 ## Feature flags
 
 | Feature | Enables |
 | --- | --- |
-| `axum` | Tower layer (`Guard::layer`) and the `AuthSession` extractor for axum 0.8 |
+| `axum` | Tower layer (`Guard::layer`), the `AuthSession` and `Sessions` extractors and response impls for axum 0.8; enables `tokio` |
+| `aide` | OpenAPI docs through aide and rovo: the `session_cookie` security scheme; enables `axum` |
+| `tokio` | `Guard::spawn_purge`, a background task that purges expired sessions |
 | `postgres` | `PgStore` on sqlx, with embedded migrations |
 | `valkey` | `ValkeyStore` for Valkey or Redis, with atomic Lua rotation (a single primary; Cluster mode is not supported) |
 | `maxmind` | `MaxMindIntel`: country and ASN from GeoLite2 / GeoIP2 databases |
@@ -259,6 +266,67 @@ let layer = guard
     .bypass_when(|headers| headers.contains_key("x-api-key"));
 # let _ = layer;
 ```
+
+## OpenAPI (aide and rovo)
+
+With the `aide` feature the extractors and errors document themselves:
+
+- `AuthSession` marks its route as requiring the `session_cookie` scheme and documents the layer's 401 rejections.
+- `Sessions` leaves the route public.
+- `GuardError` documents its 500, and `StepUpError` its 401, 403 and 500.
+
+Add the scheme itself in `finish_api_with`: `session_guard::aide::security_scheme(&guard)` is an `apiKey` in the cookie, named after the guard's cookie, registered under `SECURITY_SCHEME`.
+With rovo, name other schemes with `@security` in the handler's metadata, and register them the same way.
+
+```rust
+use rovo::{Router, aide::openapi::OpenApi, routing::get, rovo};
+use session_guard::{
+    AuthSession, Guard, MemoryStore,
+    aide::{SECURITY_SCHEME, security_scheme},
+};
+use uuid::Uuid;
+
+/// The signed-in user.
+///
+/// # Responses
+///
+/// 200: String - The subject
+#[rovo]
+async fn me(session: AuthSession<Uuid>) -> String {
+    session.subject.to_string()
+}
+
+/// Ping with an API key; the layer bypasses it (see `bypass_bearer_prefixes`).
+///
+/// # Responses
+///
+/// 200: String - Pong
+///
+/// # Metadata
+///
+/// @security bearer
+#[rovo]
+async fn ping() -> String {
+    "pong".to_owned()
+}
+
+let guard = Guard::new(MemoryStore::new());
+let mut api = OpenApi::default();
+let app: axum::Router = Router::new()
+    .route("/me", get(me))
+    .route("/api/ping", get(ping))
+    .into_inner()
+    .layer(guard.layer().bypass_bearer_prefixes(["pat_"]))
+    .finish_api_with(&mut api, |api| {
+        api.title("My API")
+            .security_scheme(SECURITY_SCHEME, security_scheme(&guard))
+        // .security_scheme("bearer", ..) for `@security bearer`
+    });
+// Serve `api` with rovo's Swagger UI.
+# let _ = app;
+```
+
+`examples/app/` shows the whole setup, including Swagger UI and a separate strict layer for sensitive routes.
 
 ## Reverse proxies
 
@@ -370,7 +438,7 @@ Roll out in shadow mode first: watch the events, tune weights, then switch to `M
 
 Stored per session: the subject, timestamps, the token hashes and a fingerprint baseline (IP prefix, country, ASN, browser, OS, client hints, languages, TLS fingerprint).
 Events additionally store the client IP and a truncated User-Agent.
-Events are kept for 90 days (`event_retention`); `guard.purge_expired()` deletes expired sessions and old events and returns a `PurgeReport`. Call it periodically.
+Events are kept for 90 days (`event_retention`); `guard.purge_expired()` deletes expired sessions and old events and returns a `PurgeReport`. Call it periodically, or let `guard.spawn_purge(every)` (`tokio` feature) do it.
 `minimize_event_ip(true)` masks event IPs to /24 (IPv4) or /48 (IPv6).
 You, as the controller, decide the legal basis, the retention you configure, and how data subjects' requests are handled (`list_sessions`, `revoke_all_for_subject`).
 
