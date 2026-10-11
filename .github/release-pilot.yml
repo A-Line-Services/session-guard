@@ -42,3 +42,12 @@ versionFiles:
     - file: README.md
       pattern: 'session-guard = \{ version = "[0-9]+\.[0-9]+"'
       replace: 'session-guard = { version = "{major}.{minor}"'
+
+    # Same snippet in llms.txt, and both copied into llms-full.txt by
+    # scripts/gen-llms-full.sh, so `llms-check` passes after a release
+    - file: llms.txt
+      pattern: 'session-guard = \{ version = "[0-9]+\.[0-9]+"'
+      replace: 'session-guard = { version = "{major}.{minor}"'
+    - file: llms-full.txt
+      pattern: 'session-guard = \{ version = "[0-9]+\.[0-9]+"'
+      replace: 'session-guard = { version = "{major}.{minor}"'
