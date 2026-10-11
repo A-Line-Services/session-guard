@@ -123,26 +123,25 @@ Without `ConnectInfo<SocketAddr>` the layer fails closed with a 500.
 Without a framework, call the guard directly:
 
 ```rust
-# async fn demo() -> Result<(), session_guard::GuardError> {
 use session_guard::{ClientContext, Guard, MemoryStore, Outcome};
 
-let guard = Guard::new(MemoryStore::new());
-let ctx = ClientContext::new("203.0.113.7".parse().unwrap()).with_user_agent("Mozilla/5.0");
-let user = uuid::Uuid::new_v4();
+async fn demo() -> Result<(), session_guard::GuardError> {
+    let guard = Guard::new(MemoryStore::new());
+    let ctx = ClientContext::new("203.0.113.7".parse().unwrap()).with_user_agent("Mozilla/5.0");
+    let user = uuid::Uuid::new_v4();
 
-let session = guard.login(&user, &ctx, None).await?;
-match guard.authenticate(session.token.expose(), &ctx).await? {
-    Outcome::Authenticated(auth) => {
-        assert_eq!(auth.session.subject, user);
-        // send `auth.rotated` as Set-Cookie when present
+    let session = guard.login(&user, &ctx, None).await?;
+    match guard.authenticate(session.token.expose(), &ctx).await? {
+        Outcome::Authenticated(auth) => {
+            assert_eq!(auth.session.subject, user);
+            // send `auth.rotated` as Set-Cookie when present
+        }
+        Outcome::Rejected(rejection) => {
+            // answer 401 with {"error": rejection.as_str()}
+        }
     }
-    Outcome::Rejected(rejection) => {
-        // answer 401 with {"error": rejection.as_str()}
-        # let _ = rejection;
-    }
+    Ok(())
 }
-# Ok(())
-# }
 ```
 
 ### Examples
@@ -204,14 +203,15 @@ A frontend should treat `step_up_required` as "show the re-verification prompt, 
 After the user re-verified, complete the step-up with the verified subject. A subject mismatch changes nothing.
 
 ```rust,no_run
-# use session_guard::{ClientContext, Guard, MemoryStore, StepUpOutcome};
-# async fn demo(guard: Guard<MemoryStore>, token: &str, ctx: ClientContext, user: uuid::Uuid) -> Result<(), session_guard::GuardError> {
-match guard.complete_step_up(token, &ctx, &user).await? {
-    StepUpOutcome::Completed(new_token) => { /* send new_token.set_cookie() */ let _ = new_token; }
-    StepUpOutcome::SubjectMismatch | StepUpOutcome::Rejected(_) => { /* 401 */ }
+use session_guard::{ClientContext, Guard, MemoryStore, StepUpOutcome};
+
+async fn demo(guard: Guard<MemoryStore>, token: &str, ctx: ClientContext, user: uuid::Uuid) -> Result<(), session_guard::GuardError> {
+    match guard.complete_step_up(token, &ctx, &user).await? {
+        StepUpOutcome::Completed(new_token) => { /* send new_token.set_cookie() */ }
+        StepUpOutcome::SubjectMismatch | StepUpOutcome::Rejected(_) => { /* 401 */ }
+    }
+    Ok(())
 }
-# Ok(())
-# }
 ```
 
 `complete_step_up` trusts the subject you pass, so call it only after your own verification succeeded. A session waiting for step-up keeps aging: if the idle timeout passes first, it expires and the user logs in again.
@@ -239,7 +239,6 @@ let config = GuardConfig::builder()
     .cookie(CookieConfig::named("__Secure-app").same_site(SameSite::Strict).path("/app"))
     .build()
     .unwrap();
-# let _ = config;
 ```
 
 `build()` validates the cookie: the name must be a valid HTTP token, the path must start with `/` and contain no `;`, the domain must not be empty or contain `;`, `__Host-` requires `Secure`, no `Domain` and `Path=/`, `__Secure-` requires `Secure`, and `SameSite=None` requires `Secure`.
@@ -259,13 +258,13 @@ assert_eq!(config.token_prefix(), Some("sess_"));
 If the same endpoints also accept API keys, tell the layer which requests to leave alone. Bypassed requests reach the inner service untouched (no `AuthSession`, no headers added) and your app authenticates them.
 
 ```rust,no_run
-# use session_guard::{Guard, MemoryStore};
-# let guard = Guard::new(MemoryStore::new());
+use session_guard::{Guard, MemoryStore};
+
+let guard = Guard::new(MemoryStore::new());
 let layer = guard
     .layer()
     .bypass_bearer_prefixes(["pat_", "svc_"])
     .bypass_when(|headers| headers.contains_key("x-api-key"));
-# let _ = layer;
 ```
 
 ## OpenAPI (aide and rovo)
@@ -324,7 +323,6 @@ let app: axum::Router = Router::new()
         // .security_scheme("bearer", ..) for `@security bearer`
     });
 // Serve `api` with rovo's Swagger UI.
-# let _ = app;
 ```
 
 `examples/app/` shows the whole setup, including Swagger UI and a separate strict layer for sensitive routes.
@@ -343,7 +341,6 @@ let config = GuardConfig::builder()
     .max_header_len(512)
     .build()
     .unwrap();
-# let _ = config;
 ```
 
 `X-Forwarded-For` is honoured only when the direct peer is a trusted proxy. The chain is walked right to left, skipping trusted hops; the first untrusted address is the client. A malformed hop stops the walk and falls back to the peer.
@@ -417,7 +414,6 @@ let config = GuardConfig::builder()
     .last_seen_write_interval(Duration::from_secs(60))
     .build()
     .unwrap();
-# let _ = config;
 ```
 
 Presets: `Checks::default()`, `Checks::none()` (only rotation and reuse detection) and `Checks::strict()` (IP prefix, ASN, language, TLS and ping-pong at 40, country change at 80).
@@ -463,7 +459,6 @@ let guard = Guard::builder(MemoryStore::new(), GuardConfig::default())
 
 // After geoipupdate, swap the databases without a restart; lookups stay lock-free.
 intel.reload(country, Some(asn)).unwrap();
-# let _ = guard;
 ```
 
 If you never reload, pass the `MaxMindIntel` itself to `ip_intel`. Any closure `Fn(IpAddr) -> IpInfo`, and any `Arc` of an `IpIntel`, is an `IpIntel`.
