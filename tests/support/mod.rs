@@ -3,6 +3,8 @@
 //! Each image runs in one named container that every test process reuses, across runs too
 //! (testcontainers' `ReuseDirective::Always`). nextest runs each test in its own process, so a
 //! container per process would pile up; `just test-clean` removes the shared ones.
+//!
+//! `DATABASE_URL` and `VALKEY_URL` point the tests at existing servers instead (CI services).
 
 #![allow(dead_code, reason = "each test crate uses some of these")]
 
@@ -42,10 +44,13 @@ async fn shared(image: impl Fn() -> ContainerRequest<GenericImage>, port: u16, n
     (host, port)
 }
 
-/// URL of the shared Valkey.
+/// URL of the shared Valkey, or `VALKEY_URL`.
 pub async fn valkey_url() -> &'static str {
     static URL: OnceCell<String> = OnceCell::const_new();
     URL.get_or_init(|| async {
+        if let Ok(url) = std::env::var("VALKEY_URL") {
+            return url;
+        }
         let image = || {
             GenericImage::new("valkey/valkey", "8-alpine")
                 .with_exposed_port(6379.tcp())
@@ -58,10 +63,13 @@ pub async fn valkey_url() -> &'static str {
     .await
 }
 
-/// URL of the shared Postgres.
+/// URL of the shared Postgres, or `DATABASE_URL`.
 pub async fn postgres_url() -> &'static str {
     static URL: OnceCell<String> = OnceCell::const_new();
     URL.get_or_init(|| async {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
         let image = || {
             GenericImage::new("postgres", "18-alpine")
                 .with_exposed_port(5432.tcp())
