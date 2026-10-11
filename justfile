@@ -58,6 +58,10 @@ bench:
 fuzz target="cookie" seconds="60":
     cd fuzz && cargo +nightly fuzz run {{target}} -- -max_total_time={{seconds}}
 
+# Compile the fuzz targets (outside the workspace, so nothing else builds them).
+fuzz-check:
+    cargo check --manifest-path fuzz/Cargo.toml --locked
+
 coverage:
     cargo llvm-cov nextest --all-features --lcov --output-path lcov.info
 
@@ -79,7 +83,7 @@ semver:
     cargo semver-checks
 
 # What CI runs.
-ci: lint test doc-stable hack llms-check
+ci: lint test doc-stable hack fuzz-check llms-check
 
 examples:
     cargo build -p examples

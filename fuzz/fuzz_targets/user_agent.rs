@@ -51,7 +51,7 @@ fn check_fingerprint(ctx: &ClientContext) {
         "identical request fired {:?}",
         assessment.signals
     );
-    assert!(!Baseline::new(fingerprint.clone()).absorb(&fingerprint, now));
+    assert!(!Baseline::new(fingerprint.clone()).absorb(&fingerprint, now, &Checks::strict()));
 
     let json = serde_json::to_string(&fingerprint).expect("serializes");
     assert_eq!(

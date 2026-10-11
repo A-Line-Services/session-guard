@@ -40,6 +40,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo clippy --all-targets --no-default-features -- -D warnings
+      # The fuzz crate is outside the workspace and only fuzzed weekly.
+      - name: Check fuzz targets
+        run: cargo check --manifest-path fuzz/Cargo.toml --locked
 
   doc:
     name: rustdoc
