@@ -525,9 +525,9 @@ pub async fn list_subject_sessions<St: SessionStore>(store: St) {
 
 /// Expired (absolute) and idle sessions are purged; live ones stay.
 pub async fn delete_expired_absolute_and_idle<St: SessionStore>(store: St) {
-    // Far in the future, so purges of real data running against a shared database never
-    // reach these rows.
-    let base = far_future();
+    // Far in the past, so these purges only reach rows at least that old: never the live rows
+    // of other tests or apps sharing the database.
+    let base = far_past();
     let mut expired = sample_session(base);
     expired.expires_at = base;
     let mut idle = sample_session(base);
@@ -551,7 +551,7 @@ pub async fn delete_expired_absolute_and_idle<St: SessionStore>(store: St) {
 
 /// Events are recorded and purged strictly before the cutoff.
 pub async fn events_record_and_purge<St: SessionStore>(store: St) {
-    let at = far_future();
+    let at = far_past();
     let event = SessionEvent {
         session_id: Uuid::new_v4(),
         subject: "\"conformance\"".into(),
@@ -614,11 +614,11 @@ pub async fn apply_to_missing_session<St: SessionStore>(store: St) {
     assert!(!store.apply(&update).await.unwrap());
 }
 
-/// A random whole-minute instant in the 23rd century.
-fn far_future() -> DateTime<Utc> {
+/// A random whole-minute instant between 1900 and 1931.
+fn far_past() -> DateTime<Utc> {
     let bytes = Uuid::new_v4().into_bytes();
     let minutes = i64::from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]));
-    DateTime::from_timestamp(7_258_118_400 + minutes * 60, 0).unwrap_or_default()
+    DateTime::from_timestamp(-2_208_988_800 + minutes * 60, 0).unwrap_or_default()
 }
 
 /// Polls every future to completion concurrently, without a runtime dependency.
