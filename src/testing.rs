@@ -4,8 +4,15 @@
 //! [`store_conformance!`](crate::store_conformance), which needs `tokio` (with the `macros` and
 //! `rt-multi-thread` features) as a dev-dependency:
 //!
-//! ```ignore
-//! session_guard::store_conformance!(|| async { MyStore::connect("…").await.unwrap() });
+//! ```no_run
+//! # #[cfg(feature = "valkey")]
+//! # mod suite {
+//! use session_guard::ValkeyStore;
+//!
+//! session_guard::store_conformance!(|| async {
+//!     ValkeyStore::connect("redis://localhost:6379").await.unwrap()
+//! });
+//! # }
 //! ```
 //!
 //! The tests use random ids and subjects and whole-second timestamps, so they can share one

@@ -21,7 +21,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -31,7 +31,7 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -43,7 +43,7 @@ jobs:
     name: rustdoc
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps --all-features
@@ -58,7 +58,7 @@ jobs:
       matrix:
         toolchain: [stable, "1.94"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -68,11 +68,19 @@ jobs:
       - name: Test
         if: matrix.toolchain == 'stable'
         run: cargo test --features axum,maxmind,metrics,testing
-      # Dev-dependencies may need a newer rustc than the MSRV, so the MSRV row
-      # only checks the library itself.
+      - name: Doc tests
+        if: matrix.toolchain == 'stable'
+        run: cargo test --doc --all-features
+      - name: Build examples
+        if: matrix.toolchain == 'stable'
+        run: cargo build --examples --all-features
+      # Tests need Docker services, so the MSRV row only compiles everything
+      # (library, tests, examples, benches) and the library without features.
       - name: Check MSRV
         if: matrix.toolchain != 'stable'
-        run: cargo check --all-features --lib
+        run: |
+          cargo check --all-features --all-targets
+          cargo check --no-default-features --lib
 
   integration:
     name: integration (postgres, valkey, e2e)
@@ -104,7 +112,7 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       VALKEY_URL: redis://localhost:6379
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features --test postgres --test valkey --test e2e
@@ -113,7 +121,7 @@ jobs:
     name: feature powerset
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -125,14 +133,14 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   audit:
     name: cargo-audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
@@ -147,5 +155,14 @@ jobs:
     # continue-on-error after the first release.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: obi1kenobi/cargo-semver-checks-action@v2
+
+  package:
+    name: cargo package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo package --locked
