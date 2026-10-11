@@ -57,7 +57,8 @@ Initial release.
 - Valkey / Redis store with atomic Lua rotation (`valkey` feature).
 - In-memory store for tests and single-process use.
 - MaxMind GeoLite2 / GeoIP2 country and ASN IP intelligence with hot reload
-  (`maxmind` feature).
+  (`maxmind` feature). `IpIntel` is implemented for `Arc<T>`, so the guard can
+  share a source the app reloads.
 - Metrics via the `metrics` facade (`metrics` feature).
 - `store_conformance!` test suite and helpers for custom stores (`testing`
   feature).

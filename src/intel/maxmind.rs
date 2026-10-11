@@ -161,6 +161,9 @@ impl MaxMindIntel {
     /// Replaces both databases with freshly read files. In-flight lookups finish on the old
     /// databases. On error the current databases stay in place.
     ///
+    /// To reload a source the guard uses, wrap it in an `Arc`, pass a clone to
+    /// [`GuardBuilder::ip_intel`](crate::GuardBuilder::ip_intel) and keep the other.
+    ///
     /// # Errors
     ///
     /// As for [`open`](Self::open).

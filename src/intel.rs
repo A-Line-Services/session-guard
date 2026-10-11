@@ -54,6 +54,14 @@ where
     }
 }
 
+/// Lets the guard share a source the app keeps a handle to, for example to reload `MaxMind`
+/// databases.
+impl<T: IpIntel + ?Sized> IpIntel for std::sync::Arc<T> {
+    fn lookup(&self, ip: IpAddr) -> IpInfo {
+        (**self).lookup(ip)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +71,22 @@ mod tests {
         let intel = |_ip: IpAddr| IpInfo::new(Some("BE".into()), Some(5432));
         assert_eq!(intel.lookup("1.2.3.4".parse().unwrap()).asn, Some(5432));
         assert_eq!(NoIpIntel.lookup("1.2.3.4".parse().unwrap()), IpInfo::default());
+    }
+
+    #[test]
+    fn shared_sources_are_sources() {
+        fn source(intel: impl IpIntel) -> impl IpIntel {
+            intel
+        }
+        #[derive(Debug)]
+        struct Fixed;
+        impl IpIntel for Fixed {
+            fn lookup(&self, _ip: IpAddr) -> IpInfo {
+                IpInfo::new(Some("BE".into()), None)
+            }
+        }
+        let shared = std::sync::Arc::new(Fixed);
+        let intel = source(std::sync::Arc::clone(&shared));
+        assert_eq!(intel.lookup("1.2.3.4".parse().unwrap()).country.as_deref(), Some("BE"));
     }
 }

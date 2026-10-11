@@ -379,16 +379,15 @@ Enable `maxmind` and give the guard an `IpIntel` source. Without one, IP changes
 ```rust,no_run
 use std::sync::Arc;
 
-use session_guard::{Guard, GuardConfig, IpIntel, MaxMindIntel, MemoryStore};
+use session_guard::{Guard, GuardConfig, MaxMindIntel, MemoryStore};
 
 let country = "/var/lib/GeoIP/GeoLite2-Country.mmdb";
 let asn = "/var/lib/GeoIP/GeoLite2-ASN.mmdb";
 let intel = Arc::new(MaxMindIntel::open(country, Some(asn)).unwrap());
 
-// `MaxMindIntel` is not implemented for `Arc`, so hand the guard a closure and keep the handle.
-let shared = Arc::clone(&intel);
+// The guard shares the source; keep the handle to reload it.
 let guard = Guard::builder(MemoryStore::new(), GuardConfig::default())
-    .ip_intel(move |ip| shared.lookup(ip))
+    .ip_intel(Arc::clone(&intel))
     .build();
 
 // After geoipupdate, swap the databases without a restart; lookups stay lock-free.
@@ -396,7 +395,7 @@ intel.reload(country, Some(asn)).unwrap();
 # let _ = guard;
 ```
 
-If you never reload, pass the `MaxMindIntel` itself to `ip_intel`. Any closure `Fn(IpAddr) -> IpInfo` is an `IpIntel`.
+If you never reload, pass the `MaxMindIntel` itself to `ip_intel`. Any closure `Fn(IpAddr) -> IpInfo`, and any `Arc` of an `IpIntel`, is an `IpIntel`.
 
 ## Performance
 
