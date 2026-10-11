@@ -29,10 +29,10 @@ async fn shared(image: impl Fn() -> ContainerRequest<GenericImage>, port: u16, n
             .with_reuse(ReuseDirective::Always);
         match request.start().await {
             Ok(container) => break container,
-            Err(e) if attempt < 10 => {
+            Err(e) if attempt < 40 => {
                 attempt += 1;
                 eprintln!("joining test container {name} (attempt {attempt}): {e}");
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
             Err(e) => panic!("start test container {name}: {e}"),
         }
