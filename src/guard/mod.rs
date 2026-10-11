@@ -25,7 +25,7 @@ pub use outcome::{
 };
 
 use crate::{
-    checks::{Checks, Decision},
+    checks::{Check, Checks, Decision},
     client::{ClientContext, HeaderSource, resolve_client_ip},
     clock::{Clock, SystemClock},
     config::{GuardConfig, Mode, StepUpPolicy},
@@ -292,6 +292,23 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         Ok(Some((rotation, token)))
     }
 
+    /// Scores the request: the fingerprint against the baseline, plus the token's own state.
+    fn assess(
+        &self,
+        baseline: &Baseline,
+        fingerprint: &Fingerprint,
+        state: TokenState,
+        now: DateTime<Utc>,
+        checks: &Checks,
+    ) -> crate::risk::Assessment {
+        let window = self.inner.config.ping_pong_window;
+        let mut assessment = crate::risk::assess(baseline, fingerprint, now, window, checks);
+        if state == TokenState::Orphaned {
+            assessment.add(Check::OrphanedToken, checks);
+        }
+        assessment
+    }
+
     async fn authenticate_inner(
         &self,
         token: &str,
@@ -319,7 +336,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         }
 
         let fingerprint = self.fingerprint(ctx);
-        let assessment = crate::risk::assess(&session.baseline, &fingerprint, now, config.ping_pong_window, checks);
+        let assessment = self.assess(&session.baseline, &fingerprint, state, now, checks);
         let decision = config.thresholds.decide(assessment.score);
         crate::telemetry::assessed(decision, &assessment.signals);
         let shadow = config.mode == Mode::Shadow;
@@ -697,6 +714,14 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         }
     }
 
+    /// Whether an orphaned token was superseded longer ago than the reissue window allows.
+    fn orphan_too_old(&self, lookup: &crate::store::TokenLookup, now: DateTime<Utc>) -> bool {
+        match (self.inner.config.orphan_reissue_window, lookup.token.superseded_at) {
+            (Some(window), Some(at)) => now - at > window,
+            _ => false,
+        }
+    }
+
     /// Finds a token's live session. Expired sessions are deleted on sight.
     async fn resolve(&self, token: &str, now: DateTime<Utc>) -> Result<Result<Resolved<S>, Rejection>, GuardError> {
         let store = &self.inner.store;
@@ -715,6 +740,10 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             return Ok(Err(Rejection::NotAuthenticated));
         };
         let state = self.classify(&lookup, now);
+        if state == TokenState::Orphaned && self.orphan_too_old(&lookup, now) {
+            // Treated like a pruned token: the session stays with whoever holds the successor.
+            return Ok(Err(Rejection::NotAuthenticated));
+        }
         Ok(Ok(Resolved {
             lookup,
             hash,

@@ -87,6 +87,7 @@ pub struct GuardConfig {
     pub(crate) shadow_dedup_window: TimeDelta,
     pub(crate) max_header_len: usize,
     pub(crate) token_prefix: Option<String>,
+    pub(crate) orphan_reissue_window: Option<TimeDelta>,
 }
 
 impl Default for GuardConfig {
@@ -192,6 +193,11 @@ impl GuardConfig {
     pub fn token_prefix(&self) -> Option<&str> {
         self.token_prefix.as_deref()
     }
+
+    /// How long after being superseded an orphaned token is still reissued, if limited.
+    pub fn orphan_reissue_window(&self) -> Option<Duration> {
+        self.orphan_reissue_window.map(to_std)
+    }
 }
 
 fn to_std(delta: TimeDelta) -> Duration {
@@ -219,6 +225,7 @@ pub struct GuardConfigBuilder {
     shadow_dedup_window: Duration,
     max_header_len: usize,
     token_prefix: Option<String>,
+    orphan_reissue_window: Option<Duration>,
 }
 
 impl Default for GuardConfigBuilder {
@@ -243,6 +250,7 @@ impl Default for GuardConfigBuilder {
             shadow_dedup_window: Duration::from_secs(10 * MINUTE),
             max_header_len: 512,
             token_prefix: None,
+            orphan_reissue_window: None,
         }
     }
 }
@@ -332,6 +340,17 @@ impl GuardConfigBuilder {
     /// What a step-up decision does. Default [`StepUpPolicy::Require`].
     pub fn step_up_policy(mut self, policy: StepUpPolicy) -> Self {
         self.step_up_policy = policy;
+        self
+    }
+
+    /// How long after being superseded an orphaned token (its successor never presented) is
+    /// still reissued. Past it the token is rejected as unknown and the session is left to
+    /// whoever holds the successor. Default off: orphans are reissued until
+    /// `rotation.reuse_detection` prunes them.
+    ///
+    /// Zero never reissues: a client that loses a single rotation response is signed out.
+    pub fn orphan_reissue_window(mut self, window: Duration) -> Self {
+        self.orphan_reissue_window = Some(window);
         self
     }
 
@@ -431,6 +450,10 @@ impl GuardConfigBuilder {
             shadow_dedup_window: bounded(self.shadow_dedup_window, "shadow_dedup_window")?,
             max_header_len: self.max_header_len,
             token_prefix: self.token_prefix,
+            orphan_reissue_window: self
+                .orphan_reissue_window
+                .map(|w| bounded(w, "orphan_reissue_window"))
+                .transpose()?,
         })
     }
 }
@@ -470,6 +493,7 @@ mod tests {
         assert_eq!(c.event_retention(), Duration::from_hours(90 * 24));
         assert!(!c.minimize_event_ip());
         assert_eq!(c.trusted_proxies(), &[]);
+        assert_eq!(c.orphan_reissue_window(), None);
     }
 
     #[test]
@@ -489,9 +513,11 @@ mod tests {
             .mode(Mode::Shadow)
             .step_up_policy(StepUpPolicy::Allow)
             .minimize_event_ip(true)
+            .orphan_reissue_window(Duration::from_secs(3600))
             .build()
             .unwrap();
         assert_eq!(c.cookie().cookie_name(), "__Host-app");
+        assert_eq!(c.orphan_reissue_window(), Some(Duration::from_secs(3600)));
         assert_eq!(c.trusted_proxies().len(), 3);
         assert!(
             c.trusted_proxies()
@@ -551,6 +577,10 @@ mod tests {
             b().idle_timeout(Duration::MAX).build().unwrap_err(),
             ConfigError::InvalidDuration("idle_timeout")
         );
+        assert_eq!(
+            b().orphan_reissue_window(Duration::MAX).build().unwrap_err(),
+            ConfigError::InvalidDuration("orphan_reissue_window")
+        );
         assert!(matches!(
             b().tls_fingerprint_header("x ja4").build(),
             Err(ConfigError::InvalidHeaderName(_))
@@ -577,6 +607,7 @@ mod tests {
             .ping_pong_window(Duration::ZERO)
             .last_seen_write_interval(Duration::ZERO)
             .shadow_dedup_window(Duration::ZERO)
+            .orphan_reissue_window(Duration::ZERO)
             .rotation(RotationConfig {
                 grace: Duration::ZERO,
                 ..RotationConfig::default()
@@ -584,5 +615,6 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(c.rotation().grace, Duration::ZERO);
+        assert_eq!(c.orphan_reissue_window(), Some(Duration::ZERO));
     }
 }

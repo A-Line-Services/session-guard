@@ -57,12 +57,22 @@ fn attacker() -> ClientContext {
         .with_accept_language("en-US,en;q=0.5")
 }
 
+/// Same browser, other provider in the same country: ASN (20) alone is allowed.
+fn mobile() -> ClientContext {
+    ClientContext::new(ip("100.64.0.10"))
+        .with_user_agent(CHROME_WIN)
+        .with_ch_platform("\"Windows\"")
+        .with_ch_mobile(false)
+        .with_accept_language("en-US,en;q=0.9")
+}
+
 fn intel(ip: IpAddr) -> IpInfo {
-    let country = match ip {
-        IpAddr::V4(v4) if v4.octets()[..3] == [198, 51, 100] => "DE",
-        _ => "US",
+    let (country, asn) = match ip {
+        IpAddr::V4(v4) if v4.octets()[..3] == [198, 51, 100] => ("DE", 64500),
+        IpAddr::V4(v4) if v4.octets()[..3] == [100, 64, 0] => ("US", 64501),
+        _ => ("US", 64500),
     };
-    IpInfo::new(Some(country.into()), None)
+    IpInfo::new(Some(country.into()), Some(asn))
 }
 
 struct Harness<S = Uuid> {
@@ -244,8 +254,155 @@ async fn lost_rotation_response_is_reissued() {
     h.advance(mins(1));
     let a = authenticated(h.guard.authenticate(&t0, &home()).await.unwrap());
     let t2 = a.rotated.expect("orphaned token gets a fresh one");
+    assert_eq!(a.assessment.signals, vec![Check::OrphanedToken]);
+    assert_eq!(a.assessment.score, 25);
     assert_eq!(h.count(EventKind::TokenReissued), 1);
-    authenticated(h.guard.authenticate(t2.expose(), &home()).await.unwrap());
+    let a = authenticated(h.guard.authenticate(t2.expose(), &home()).await.unwrap());
+    assert_eq!(a.assessment.signals, vec![]);
+}
+
+/// Logs in and rotates once, dropping the successor: the returned token is orphaned once
+/// the grace period has passed.
+async fn orphan(h: &Harness, user: Uuid) -> String {
+    let t0 = login(h, user).await;
+    h.advance(mins(11));
+    let _lost = authenticated(h.guard.authenticate(&t0, &home()).await.unwrap())
+        .rotated
+        .unwrap();
+    h.advance(mins(1));
+    t0
+}
+
+#[tokio::test]
+async fn orphan_on_another_network_needs_step_up() {
+    let h = harness();
+    let user = Uuid::new_v4();
+    // A network change alone is fine.
+    let fresh = login(&h, user).await;
+    let a = authenticated(h.guard.authenticate(&fresh, &mobile()).await.unwrap());
+    assert_eq!(a.assessment.signals, vec![Check::AsnChanged]);
+
+    let t0 = orphan(&h, user).await;
+    assert_eq!(
+        rejected(h.guard.authenticate(&t0, &mobile()).await.unwrap()),
+        Rejection::StepUpRequired
+    );
+    let event = h.events.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(event.kind, EventKind::StepUpRequired);
+    assert_eq!(event.signals, vec![Check::OrphanedToken, Check::AsnChanged]);
+    assert_eq!(event.score, Some(45));
+    assert_eq!(h.count(EventKind::TokenReissued), 0);
+
+    let StepUpOutcome::Completed(t1) = h.guard.complete_step_up(&t0, &mobile(), &user).await.unwrap() else {
+        panic!("step-up with the orphaned token should complete");
+    };
+    let a = authenticated(h.guard.authenticate(t1.expose(), &mobile()).await.unwrap());
+    assert_eq!(a.assessment.signals, vec![]);
+}
+
+#[tokio::test]
+async fn orphan_without_checks_is_reissued_unscored() {
+    let h = harness();
+    let t0 = orphan(&h, Uuid::new_v4()).await;
+    let a = authenticated(
+        h.guard
+            .authenticate_with(&t0, &mobile(), &Checks::none())
+            .await
+            .unwrap(),
+    );
+    assert!(a.rotated.is_some());
+    assert_eq!(a.assessment.signals, vec![]);
+    assert_eq!(a.assessment.score, 0);
+    assert_eq!(h.count(EventKind::TokenReissued), 1);
+}
+
+#[tokio::test]
+async fn orphan_signal_can_be_disabled() {
+    let h = harness_with(
+        GuardConfig::builder()
+            .checks(Checks::default().disable(Check::OrphanedToken))
+            .build()
+            .unwrap(),
+    );
+    let t0 = orphan(&h, Uuid::new_v4()).await;
+    let a = authenticated(h.guard.authenticate(&t0, &mobile()).await.unwrap());
+    assert!(a.rotated.is_some());
+    assert_eq!(a.assessment.signals, vec![Check::AsnChanged]);
+}
+
+#[tokio::test]
+async fn orphan_in_shadow_mode_is_reissued() {
+    let h = harness_with(GuardConfig::builder().mode(Mode::Shadow).build().unwrap());
+    let t0 = orphan(&h, Uuid::new_v4()).await;
+    let a = authenticated(h.guard.authenticate(&t0, &mobile()).await.unwrap());
+    assert!(a.rotated.is_some());
+    assert_eq!(a.assessment.score, 45);
+    assert!(h.kinds().contains(&(EventKind::StepUpRequired, false)));
+    assert_eq!(h.count(EventKind::TokenReissued), 1);
+}
+
+fn reissue_window(window: Duration) -> Harness {
+    harness_with(GuardConfig::builder().orphan_reissue_window(window).build().unwrap())
+}
+
+#[tokio::test]
+async fn orphan_within_the_reissue_window_is_reissued() {
+    let h = reissue_window(mins(5));
+    let t0 = orphan(&h, Uuid::new_v4()).await;
+    h.advance(mins(3));
+    let a = authenticated(h.guard.authenticate(&t0, &home()).await.unwrap());
+    assert!(a.rotated.is_some());
+    assert_eq!(h.count(EventKind::TokenReissued), 1);
+}
+
+#[tokio::test]
+async fn orphan_beyond_the_reissue_window_is_not_authenticated() {
+    let h = reissue_window(mins(5));
+    let user = Uuid::new_v4();
+    let t0 = login(&h, user).await;
+    h.advance(mins(11));
+    // Whoever receives t1 keeps the session; t0 goes stale.
+    let t1 = authenticated(h.guard.authenticate(&t0, &home()).await.unwrap())
+        .rotated
+        .unwrap();
+    h.advance(mins(6));
+
+    assert_eq!(
+        rejected(h.guard.authenticate(&t0, &home()).await.unwrap()),
+        Rejection::NotAuthenticated
+    );
+    assert!(matches!(
+        h.guard.complete_step_up(&t0, &home(), &user).await.unwrap(),
+        StepUpOutcome::Rejected(Rejection::NotAuthenticated)
+    ));
+    assert!(h.guard.peek(&t0).await.unwrap().is_none());
+    assert_eq!(h.kinds(), vec![(EventKind::Login, true)]);
+    assert_eq!(h.store.session_count(), 1);
+
+    let a = authenticated(h.guard.authenticate(t1.expose(), &home()).await.unwrap());
+    assert_eq!(a.session.subject, user);
+    assert_eq!(a.assessment.signals, vec![]);
+}
+
+#[tokio::test]
+async fn zero_reissue_window_never_reissues() {
+    let h = reissue_window(Duration::ZERO);
+    let t0 = orphan(&h, Uuid::new_v4()).await;
+    assert_eq!(
+        rejected(h.guard.authenticate(&t0, &home()).await.unwrap()),
+        Rejection::NotAuthenticated
+    );
+    assert_eq!(h.store.session_count(), 1);
+}
+
+#[tokio::test]
+async fn orphans_are_reissued_late_by_default() {
+    let h = harness();
+    let t0 = orphan(&h, Uuid::new_v4()).await;
+    h.advance(Duration::from_hours(6 * 24));
+    let a = authenticated(h.guard.authenticate(&t0, &home()).await.unwrap());
+    assert!(a.rotated.is_some());
+    assert_eq!(h.count(EventKind::TokenReissued), 1);
 }
 
 #[tokio::test]

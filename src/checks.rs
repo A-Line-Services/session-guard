@@ -31,6 +31,9 @@ pub enum Check {
     TlsChanged,
     /// The IP returned to the previous network shortly after leaving it.
     IpPingPong,
+    /// The presented token was superseded and its successor never presented: a lost rotation
+    /// response, or a replayed stolen token.
+    OrphanedToken,
     /// The IP moved to another autonomous system (needs an [`IpIntel`](crate::IpIntel) source).
     AsnChanged,
     /// The preferred languages changed.
@@ -41,7 +44,7 @@ pub enum Check {
 
 impl Check {
     /// Every check, in declaration order.
-    pub const ALL: [Check; 14] = [
+    pub const ALL: [Check; 15] = [
         Check::OsChanged,
         Check::BrowserChanged,
         Check::PlatformHintChanged,
@@ -53,6 +56,7 @@ impl Check {
         Check::ClientHintsMissing,
         Check::TlsChanged,
         Check::IpPingPong,
+        Check::OrphanedToken,
         Check::AsnChanged,
         Check::AcceptLanguageChanged,
         Check::IpPrefixChanged,
@@ -66,7 +70,7 @@ impl Check {
             Check::BrowserDowngraded | Check::UserAgentMissing | Check::MobileHintChanged => 50,
             Check::CountryChanged => 40,
             Check::ClientHintsMissing | Check::TlsChanged => 30,
-            Check::IpPingPong => 25,
+            Check::IpPingPong | Check::OrphanedToken => 25,
             Check::AsnChanged => 20,
             Check::AcceptLanguageChanged => 15,
             Check::IpPrefixChanged => 10,
@@ -87,6 +91,7 @@ impl Check {
             Check::ClientHintsMissing => "client_hints_missing",
             Check::TlsChanged => "tls_changed",
             Check::IpPingPong => "ip_ping_pong",
+            Check::OrphanedToken => "orphaned_token",
             Check::AsnChanged => "asn_changed",
             Check::AcceptLanguageChanged => "accept_language_changed",
             Check::IpPrefixChanged => "ip_prefix_changed",
@@ -125,7 +130,7 @@ impl FromStr for Check {
 /// A disabled check is not computed at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Checks {
-    weights: [Option<u32>; 14],
+    weights: [Option<u32>; 15],
 }
 
 impl Default for Checks {
@@ -140,12 +145,12 @@ impl Default for Checks {
 impl Checks {
     /// No checks: only token rotation and reuse detection protect the session.
     pub const fn none() -> Self {
-        Self { weights: [None; 14] }
+        Self { weights: [None; 15] }
     }
 
     /// Default weights with network and environment signals raised, for sensitive routes:
-    /// IP prefix, ASN, language, TLS and ping-pong weigh 40 (step-up on their own) and a country
-    /// change weighs 80 (revoke).
+    /// IP prefix, ASN, language, TLS, ping-pong and an orphaned token weigh 40 (step-up on
+    /// their own) and a country change weighs 80 (revoke).
     pub fn strict() -> Self {
         Self::default()
             .weight(Check::IpPrefixChanged, 40)
@@ -153,6 +158,7 @@ impl Checks {
             .weight(Check::AcceptLanguageChanged, 40)
             .weight(Check::TlsChanged, 40)
             .weight(Check::IpPingPong, 40)
+            .weight(Check::OrphanedToken, 40)
             .weight(Check::CountryChanged, 80)
     }
 
@@ -259,7 +265,8 @@ mod tests {
     #[test]
     fn default_weights_match_the_spec() {
         let c = Checks::default();
-        let expected = [80, 80, 80, 60, 50, 50, 50, 40, 30, 30, 25, 20, 15, 10];
+        let expected = [80, 80, 80, 60, 50, 50, 50, 40, 30, 30, 25, 25, 20, 15, 10];
+        assert_eq!(Check::ALL.len(), expected.len());
         for (check, w) in Check::ALL.into_iter().zip(expected) {
             assert_eq!(c.weight_of(check), Some(w), "{check}");
         }
@@ -274,6 +281,7 @@ mod tests {
                 format!("\"{}\"", check.as_str())
             );
         }
+        assert_eq!("orphaned_token".parse::<Check>(), Ok(Check::OrphanedToken));
         assert!("nope".parse::<Check>().is_err());
     }
 
@@ -291,6 +299,7 @@ mod tests {
     fn strict_raises_soft_signals() {
         let s = Checks::strict();
         assert_eq!(s.weight_of(Check::IpPrefixChanged), Some(40));
+        assert_eq!(s.weight_of(Check::OrphanedToken), Some(40));
         assert_eq!(s.weight_of(Check::CountryChanged), Some(80));
         assert_eq!(s.weight_of(Check::OsChanged), Some(80));
     }

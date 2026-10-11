@@ -22,6 +22,18 @@ impl Assessment {
     pub fn decision(&self, thresholds: &Thresholds) -> Decision {
         thresholds.decide(self.score)
     }
+
+    /// Adds a signal the fingerprint comparison cannot see, if `checks` enables it, keeping
+    /// [`Check::ALL`] order.
+    pub(crate) fn add(&mut self, check: Check, checks: &Checks) {
+        if let Some(weight) = checks.weight_of(check)
+            && !self.signals.contains(&check)
+        {
+            let at = self.signals.partition_point(|c| *c < check);
+            self.signals.insert(at, check);
+            self.score = self.score.saturating_add(weight);
+        }
+    }
 }
 
 /// Compares `current` against `baseline`.
@@ -161,6 +173,25 @@ mod tests {
     fn decide(current: &Fingerprint) -> (Decision, Vec<Check>) {
         let a = assess_now(&Baseline::new(chrome_on_windows()), current);
         (a.decision(&Thresholds::default()), a.signals)
+    }
+
+    #[test]
+    fn added_signals_keep_check_order_and_respect_weights() {
+        let mut current = chrome_on_windows();
+        current.ip_prefix = "198.51.100.0/24".to_owned();
+        current.asn = Some(6848);
+        current.accept_language = Some("en".to_owned());
+        let mut a = assess_now(&Baseline::new(chrome_on_windows()), &current);
+        a.add(Check::OrphanedToken, &Checks::default());
+        assert_eq!(
+            a.signals,
+            vec![Check::OrphanedToken, Check::AsnChanged, Check::AcceptLanguageChanged]
+        );
+        assert_eq!(a.score, 25 + 20 + 15);
+
+        let mut a = Assessment::default();
+        a.add(Check::OrphanedToken, &Checks::none());
+        assert_eq!(a, Assessment::default());
     }
 
     #[test]
