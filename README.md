@@ -163,7 +163,7 @@ Complete examples: [`examples/axum_postgres.rs`](examples/axum_postgres.rs), [`e
 | --- | --- |
 | `axum` | Tower layer (`Guard::layer`) and the `AuthSession` extractor for axum 0.8 |
 | `postgres` | `PgStore` on sqlx, with embedded migrations |
-| `valkey` | `ValkeyStore` for Valkey or Redis, with atomic Lua rotation |
+| `valkey` | `ValkeyStore` for Valkey or Redis, with atomic Lua rotation (a single primary; Cluster mode is not supported) |
 | `maxmind` | `MaxMindIntel`: country and ASN from GeoLite2 / GeoIP2 databases |
 | `metrics` | Counters through the `metrics` facade |
 | `testing` | The `store_conformance!` suite and helpers for custom stores |
@@ -174,7 +174,7 @@ No feature is enabled by default. `MemoryStore` is always available and meant fo
 
 session-guard manages sessions only. Your app owns login, password verification, rate limiting, session caps and any per-session payload.
 The subject is a generic opaque type `S: Subject` (anything serializable, comparable and cloneable; `Uuid` by default). It is stored as JSON, so use a deterministic serialization (no `HashMap`).
-There are no auth routes. A tower-sessions adapter is future work.
+There are no auth routes. A tower-sessions adapter and Valkey Cluster support are future work.
 
 **Your app MUST rate-limit its login and step-up endpoints.** The guard does not.
 
@@ -206,6 +206,8 @@ match guard.complete_step_up(token, &ctx, &user).await? {
 # Ok(())
 # }
 ```
+
+`complete_step_up` trusts the subject you pass, so call it only after your own verification succeeded. A session waiting for step-up keeps aging: if the idle timeout passes first, it expires and the user logs in again.
 
 To demand a recent proof of identity on sensitive routes, use `guard.layer().require_recent_auth(Duration::from_secs(300))`; older sessions get `step_up_required` with the cookie kept.
 
