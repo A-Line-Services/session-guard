@@ -22,8 +22,8 @@ use axum::{
 };
 use reqwest::{Method, RequestBuilder};
 use session_guard::{
-    AuthSession, ClientContext, EventKind, Guard, GuardConfig, GuardConfigBuilder, IpInfo, ManualClock, Mode, PgStore,
-    Rejection, SessionEvent, SessionStore, StepUpOutcome, ValkeyStore,
+    AuthSession, EventKind, Guard, GuardConfig, GuardConfigBuilder, IpInfo, ManualClock, Mode, PgStore, Rejection,
+    SessionEvent, SessionStore, StepUpOutcome, ValkeyStore,
     axum::{client_context, rejection_response},
 };
 use sqlx::postgres::PgPoolOptions;
@@ -341,7 +341,7 @@ fn pair_value(pair: &str) -> &str {
 
 // --- scenarios ---
 
-/// 1. Login sets the hardened cookie; the protected route answers with the subject.
+/// Scenario 1: Login sets the hardened cookie; the protected route answers with the subject.
 async fn login_sets_hardened_cookie<St: SessionStore>(store: St) {
     let env = spawn(store, config()).await;
     let user = Uuid::new_v4();
@@ -357,10 +357,10 @@ async fn login_sets_hardened_cookie<St: SessionStore>(store: St) {
     let cookie = cookie_pair(set_cookie);
     let resp = env.assert_me(&cookie, user).await;
     assert_eq!(resp.header("cache-control"), Some("no-store"));
-    assert!(resp.set_cookies().is_empty());
+    assert_eq!(resp.set_cookies().len(), 0);
 }
 
-/// 2. After the rotation interval the response carries a new cookie; both tokens work within
+/// Scenario 2: After the rotation interval the response carries a new cookie; both tokens work within
 /// the grace window.
 async fn rotation_issues_new_cookie_and_grace_keeps_old<St: SessionStore>(store: St) {
     let env = spawn(store, config()).await;
@@ -368,7 +368,7 @@ async fn rotation_issues_new_cookie_and_grace_keeps_old<St: SessionStore>(store:
     let old = env.login(user).await;
 
     env.advance(Duration::from_mins(5));
-    assert!(env.assert_me(&old, user).await.set_cookies().is_empty());
+    assert_eq!(env.assert_me(&old, user).await.set_cookies().len(), 0);
 
     env.advance(Duration::from_mins(6));
     let resp = env.assert_me(&old, user).await;
@@ -377,13 +377,13 @@ async fn rotation_issues_new_cookie_and_grace_keeps_old<St: SessionStore>(store:
     assert!(resp.set_cookies()[0].contains("HttpOnly"));
 
     env.advance(Duration::from_secs(5));
-    assert!(env.assert_me(&new, user).await.set_cookies().is_empty());
+    assert_eq!(env.assert_me(&new, user).await.set_cookies().len(), 0);
     // A request that raced the rotation still presents the old token.
     let resp = env.assert_me(&old, user).await;
-    assert!(resp.set_cookies().is_empty(), "grace does not rotate again");
+    assert_eq!(resp.set_cookies().len(), 0, "grace does not rotate again");
 }
 
-/// 3. A stolen, superseded token replayed past grace revokes the session for both parties.
+/// Scenario 3: A stolen, superseded token replayed past grace revokes the session for both parties.
 async fn stolen_token_replay_revokes_session<St: SessionStore>(store: St) {
     let env = spawn(store, config()).await;
     let user = Uuid::new_v4();
@@ -406,10 +406,10 @@ async fn stolen_token_replay_revokes_session<St: SessionStore>(store: St) {
     assert_eq!(reuse.len(), 1);
     assert!(reuse[0].enforced);
     assert_eq!(reuse[0].subject::<Uuid>(), Some(user));
-    assert!(env.guard.list_sessions(&user).await.unwrap().is_empty());
+    assert_eq!(env.guard.list_sessions(&user).await.unwrap().len(), 0);
 }
 
-/// 4. A medium-risk change asks for a step-up; completing it resets the baseline.
+/// Scenario 4: A medium-risk change asks for a step-up; completing it resets the baseline.
 async fn country_change_steps_up_and_completion_resets_baseline<St: SessionStore>(store: St) {
     let env = spawn(store, config().trusted_proxies(["127.0.0.1/32"]).unwrap()).await;
     let user = Uuid::new_v4();
@@ -419,7 +419,7 @@ async fn country_change_steps_up_and_completion_resets_baseline<St: SessionStore
     // Another country alone scores 40: step-up, cookie kept.
     let resp = send(abroad("/me", &cookie)).await;
     assert_rejected(&resp, "step_up_required");
-    assert!(resp.set_cookies().is_empty());
+    assert_eq!(resp.set_cookies().len(), 0);
     assert_eq!(resp.header("clear-site-data"), None);
     assert_eq!(env.events_of(EventKind::StepUpRequired).len(), 1);
 
@@ -451,7 +451,7 @@ async fn mobile_hint_flip_steps_up<St: SessionStore>(store: St) {
     // The mobile hint flipping alone scores 50.
     let resp = send(set(env.get("/me", &cookie), "sec-ch-ua-mobile", "?1")).await;
     assert_rejected(&resp, "step_up_required");
-    assert!(resp.set_cookies().is_empty());
+    assert_eq!(resp.set_cookies().len(), 0);
 
     let resp = env.step_up(user, &cookie, &[("sec-ch-ua-mobile", "?1")]).await;
     assert_eq!(resp.status, StatusCode::OK);
@@ -460,7 +460,7 @@ async fn mobile_hint_flip_steps_up<St: SessionStore>(store: St) {
     assert_eq!(resp.status, StatusCode::OK);
 }
 
-/// 5. A drastic change (another operating system) revokes the session.
+/// Scenario 5: A drastic change (another operating system) revokes the session.
 async fn os_change_revokes_session<St: SessionStore>(store: St) {
     let env = spawn(store, config()).await;
     let user = Uuid::new_v4();
@@ -477,7 +477,7 @@ async fn os_change_revokes_session<St: SessionStore>(store: St) {
     assert_rejected(&send(env.get("/me", &cookie)).await, "not_authenticated");
 }
 
-/// 6. Logout clears the cookie and kills the token.
+/// Scenario 6: Logout clears the cookie and kills the token.
 async fn logout_kills_the_token<St: SessionStore>(store: St) {
     let env = spawn(store, config()).await;
     let user = Uuid::new_v4();
@@ -496,7 +496,7 @@ async fn logout_kills_the_token<St: SessionStore>(store: St) {
     assert_eq!(env.events_of(EventKind::Logout).len(), 1);
 }
 
-/// 7. API-key bearers bypass the guard untouched; a browser token needs the `alb_` prefix.
+/// Scenario 7: API-key bearers bypass the guard untouched; a browser token needs the `alb_` prefix.
 async fn bearer_bypass_and_token_prefix<St: SessionStore>(store: St) {
     let env = spawn(store, config()).await;
     let user = Uuid::new_v4();
@@ -509,7 +509,7 @@ async fn bearer_bypass_and_token_prefix<St: SessionStore>(store: St) {
         .await;
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(resp.body, "bypassed");
-        assert!(resp.set_cookies().is_empty());
+        assert_eq!(resp.set_cookies().len(), 0);
         assert_eq!(resp.header("cache-control"), None);
     }
     // Other bearers, and none at all, are not bypassed.
@@ -555,7 +555,7 @@ async fn untrusted_forwarded_for_is_ignored<St: SessionStore>(store: St) {
 
     let resp = send(env.get("/me", &cookie).header("x-forwarded-for", ABROAD)).await;
     assert_eq!(resp.status, StatusCode::OK, "body: {}", resp.body);
-    assert!(env.events_of(EventKind::StepUpRequired).is_empty());
+    assert_eq!(env.events_of(EventKind::StepUpRequired).len(), 0);
 }
 
 /// 9a. A session idle for longer than the idle timeout expires; activity keeps it alive.
@@ -599,7 +599,7 @@ async fn absolute_lifetime_expires_session<St: SessionStore>(store: St) {
     assert_cookie_cleared(&resp, false);
 }
 
-/// 10. Shadow mode lets risky requests through and records unenforced events; reuse is still
+/// Scenario 10: Shadow mode lets risky requests through and records unenforced events; reuse is still
 /// enforced.
 async fn shadow_mode_records_but_allows<St: SessionStore>(store: St) {
     let env = spawn(store, config().mode(Mode::Shadow)).await;
@@ -629,7 +629,7 @@ async fn shadow_mode_records_but_allows<St: SessionStore>(store: St) {
     assert_eq!(env.events_of(EventKind::TokenReuse).len(), 1);
 }
 
-/// 11. Parallel requests with the same cookie at rotation time all succeed; one rotates.
+/// Scenario 11: Parallel requests with the same cookie at rotation time all succeed; one rotates.
 async fn parallel_requests_at_rotation_do_not_trip_reuse<St: SessionStore>(store: St) {
     let env = spawn(store, config()).await;
     let user = Uuid::new_v4();
@@ -649,12 +649,12 @@ async fn parallel_requests_at_rotation_do_not_trip_reuse<St: SessionStore>(store
     }
     assert_eq!(rotated.len(), 1, "exactly one request wins the rotation");
 
-    assert!(env.events_of(EventKind::TokenReuse).is_empty());
+    assert_eq!(env.events_of(EventKind::TokenReuse).len(), 0);
     env.assert_me(&rotated[0], user).await;
     env.assert_me(&old, user).await;
 }
 
-/// 12. Logging in while presenting an old session cookie revokes that session.
+/// Scenario 12: Logging in while presenting an old session cookie revokes that session.
 async fn login_with_old_cookie_revokes_it<St: SessionStore>(store: St) {
     let env = spawn(store, config()).await;
     let user = Uuid::new_v4();
@@ -671,7 +671,7 @@ async fn login_with_old_cookie_revokes_it<St: SessionStore>(store: St) {
     assert_eq!(env.guard.list_sessions(&user).await.unwrap().len(), 1);
 }
 
-/// 13. A sensitive group demands recent authentication; a step-up refreshes it.
+/// Scenario 13: A sensitive group demands recent authentication; a step-up refreshes it.
 async fn sensitive_group_requires_recent_auth<St: SessionStore>(store: St) {
     let env = spawn(store, config()).await;
     let user = Uuid::new_v4();
