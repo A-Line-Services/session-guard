@@ -30,6 +30,10 @@ name = "core_only"
 path = "core_only.rs"
 
 [[bin]]
+name = "axum_simple"
+path = "axum_simple.rs"
+
+[[bin]]
 name = "axum_memory"
 path = "axum_memory.rs"
 
