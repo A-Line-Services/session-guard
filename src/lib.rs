@@ -40,7 +40,8 @@
 //!
 //! # Features
 //!
-//! - `axum`: a tower layer that authenticates requests and an `AuthSession` extractor.
+//! - `axum`: a tower layer that authenticates requests and an `AuthSession` extractor
+//!   (see the `axum` module).
 //! - `postgres`: a [`SessionStore`] on sqlx with embedded migrations.
 //! - `valkey`: a [`SessionStore`] on Valkey or Redis.
 //! - `maxmind`: [`IpIntel`] backed by `MaxMind` `GeoLite2`/`GeoIP2` databases.
@@ -50,6 +51,9 @@
 #![warn(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg(feature = "axum")]
+#[cfg_attr(docsrs, doc(cfg(feature = "axum")))]
+pub mod axum;
 pub mod checks;
 pub mod client;
 pub mod clock;
@@ -69,6 +73,9 @@ mod telemetry;
 pub mod testing;
 pub mod token;
 
+#[cfg(feature = "axum")]
+#[cfg_attr(docsrs, doc(cfg(feature = "axum")))]
+pub use crate::axum::{GuardLayer, GuardService};
 pub use checks::{Check, Checks, Decision, Thresholds, UnknownCheck};
 pub use client::{ClientContext, HeaderSource, canonical_ip, resolve_client_ip};
 pub use clock::{Clock, ManualClock, SystemClock};
