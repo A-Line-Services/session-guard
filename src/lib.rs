@@ -83,6 +83,9 @@ pub use guard::{
 };
 pub use intel::{IpInfo, IpIntel, NoIpIntel};
 pub use risk::{Assessment, assess};
+#[cfg(feature = "valkey")]
+#[cfg_attr(docsrs, doc(cfg(feature = "valkey")))]
+pub use store::ValkeyStore;
 pub use store::{
     MemoryStore, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord,
 };
