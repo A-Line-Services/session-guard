@@ -1,52 +1,17 @@
 //! `ValkeyStore` against a real Valkey in Docker (testcontainers).
 //!
-//! All tests share one container; every store gets a random key prefix so tests never see each
-//! other's data.
+//! All tests share one container (see `support`); every store gets a random key prefix so tests
+//! never see each other's data.
 
 use std::sync::Arc;
 
 use chrono::TimeDelta;
 use session_guard::{EventKind, Rotation, SessionStore, SessionUpdate, Supersede, ValkeyStore, testing};
-use testcontainers::{
-    GenericImage,
-    core::{IntoContainerPort, WaitFor},
-    runners::AsyncRunner,
-};
-use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-static VALKEY_URL: OnceCell<String> = OnceCell::const_new();
+mod support;
 
-/// Starts the shared container on first use and returns its URL.
-///
-/// The container is started on a dedicated runtime that outlives every test runtime, and is
-/// kept alive for the whole test process.
-async fn valkey_url() -> &'static str {
-    VALKEY_URL
-        .get_or_init(|| async {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            std::thread::spawn(move || {
-                let runtime = tokio::runtime::Runtime::new().expect("runtime");
-                runtime.block_on(async move {
-                    let container = GenericImage::new("valkey/valkey", "8-alpine")
-                        .with_exposed_port(6379.tcp())
-                        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-                        .start()
-                        .await
-                        .expect("start valkey container");
-                    let host = container.get_host().await.expect("host");
-                    let port = container.get_host_port_ipv4(6379).await.expect("port");
-                    tx.send(format!("redis://{host}:{port}")).expect("send url");
-                    // Keep the container (and the runtime driving it) alive until the process
-                    // exits.
-                    std::future::pending::<()>().await;
-                    drop(container);
-                });
-            });
-            rx.await.expect("valkey container url")
-        })
-        .await
-}
+use support::valkey_url;
 
 fn random_prefix() -> String {
     format!("sgtest:{}:", Uuid::new_v4().simple())

@@ -27,6 +27,10 @@ test-valkey:
 e2e:
     cargo nextest run --all-features --test e2e
 
+# Remove the Docker containers the store and e2e tests share across runs.
+test-clean:
+    docker ps -aq --filter label=session-guard.test | xargs -r docker rm -f
+
 # Build every feature combination.
 hack:
     cargo hack check --feature-powerset --no-dev-deps

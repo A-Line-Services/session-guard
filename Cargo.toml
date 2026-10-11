@@ -62,7 +62,7 @@ http-body-util = "0.1.5"
 proptest = "1.12.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "cookies"] }
 rovo = { version = "0.4.11", features = ["swagger"] }
-testcontainers = "0.28.0"
+testcontainers = { version = "0.28.0", features = ["reusable-containers"] }
 tokio = { version = "1.53.2", features = ["full"] }
 tower = { version = "0.5.3", features = ["util"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
