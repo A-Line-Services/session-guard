@@ -18,6 +18,7 @@ use std::{
 
 use chrono::{DateTime, TimeDelta, Utc};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 pub use outcome::{
     AuthSession, Authenticated, IssuedToken, NewSession, Outcome, PurgeReport, Rejection, SessionInfo, StepUpOutcome,
@@ -632,12 +633,14 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
     }
 
     fn issue(&self, token: &SessionToken, expires_at: DateTime<Utc>) -> IssuedToken {
-        let value = match &self.inner.config.token_prefix {
-            Some(prefix) => format!("{prefix}{}", token.expose()),
-            None => token.expose().to_owned(),
-        };
+        // Exact capacity, so neither building the value nor boxing it into the secret leaves an
+        // unwiped copy behind in a reallocated buffer.
+        let prefix = self.inner.config.token_prefix.as_deref().unwrap_or("");
+        let mut value = String::with_capacity(prefix.len() + token.expose().len());
+        value.push_str(prefix);
+        value.push_str(token.expose());
         let max_age = (expires_at - self.now()).num_seconds();
-        let set_cookie = self.inner.config.cookie.set_cookie(&value, max_age);
+        let set_cookie = Zeroizing::new(self.inner.config.cookie.set_cookie(&value, max_age));
         IssuedToken {
             value: SecretString::from(value),
             expires_at,

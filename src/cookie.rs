@@ -171,7 +171,14 @@ impl CookieConfig {
     /// Renders a `Set-Cookie` value carrying `token`. `max_age_secs` is clamped at zero and only
     /// emitted for persistent cookies.
     pub fn set_cookie(&self, token: &str, max_age_secs: i64) -> String {
-        let mut out = format!("{}={}", self.name, token);
+        // Room for every attribute up front: growing the string would leave copies of the token
+        // in freed buffers that nothing wipes.
+        let capacity =
+            self.name.len() + token.len() + self.path.len() + self.domain.as_ref().map_or(0, String::len) + 96;
+        let mut out = String::with_capacity(capacity);
+        out.push_str(&self.name);
+        out.push('=');
+        out.push_str(token);
         self.push_attributes(&mut out, self.persistent.then_some(max_age_secs.max(0)));
         out
     }

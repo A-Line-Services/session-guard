@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use secrecy::{ExposeSecret, SecretString};
+use zeroize::Zeroizing;
 
 use crate::{risk::Assessment, store::SessionRecord, subject::Subject};
 
@@ -45,7 +46,8 @@ pub struct IssuedToken {
     /// The cookie value: the configured prefix, if any, then the token.
     pub(crate) value: SecretString,
     pub(crate) expires_at: DateTime<Utc>,
-    pub(crate) set_cookie: String,
+    /// Holds the token too, so it is wiped on drop like `value`.
+    pub(crate) set_cookie: Zeroizing<String>,
 }
 
 impl IssuedToken {
