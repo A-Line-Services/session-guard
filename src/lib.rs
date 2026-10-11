@@ -135,6 +135,14 @@ pub use store::{
 pub use subject::Subject;
 pub use token::{SessionToken, TOKEN_LEN, TokenHash, is_well_formed};
 
-#[cfg(doctest)]
+// The README examples use these features, so other feature sets skip them.
+#[cfg(all(
+    doctest,
+    feature = "aide",
+    feature = "axum",
+    feature = "maxmind",
+    feature = "postgres",
+    feature = "testing"
+))]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;
