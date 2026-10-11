@@ -40,8 +40,11 @@
 //!
 //! # Features
 //!
-//! - `axum`: a tower layer that authenticates requests and an `AuthSession` extractor
-//!   (see the `axum` module).
+//! - `axum`: a tower layer that authenticates requests, the `AuthSession` and `Sessions`
+//!   extractors and response impls (see the `axum` module). Enables `tokio`.
+//! - `aide`: OpenAPI docs through `aide` and `rovo`: the `session_cookie` security scheme
+//!   (see the `aide` module).
+//! - `tokio`: `Guard::spawn_purge`, a background task that purges expired sessions.
 //! - `postgres`: a [`SessionStore`] on sqlx with embedded migrations.
 //! - `valkey`: a [`SessionStore`] on Valkey or Redis.
 //! - `maxmind`: [`IpIntel`] backed by `MaxMind` `GeoLite2`/`GeoIP2` databases.
@@ -51,6 +54,9 @@
 #![warn(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg(feature = "aide")]
+#[cfg_attr(docsrs, doc(cfg(feature = "aide")))]
+pub mod aide;
 #[cfg(feature = "axum")]
 #[cfg_attr(docsrs, doc(cfg(feature = "axum")))]
 pub mod axum;

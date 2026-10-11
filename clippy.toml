@@ -1,1 +1,2 @@
 msrv = "1.94"
+doc-valid-idents = ["OpenAPI", ".."]

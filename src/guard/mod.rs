@@ -632,6 +632,11 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         self.inner.config.cookie.clear_cookie()
     }
 
+    #[cfg(feature = "aide")]
+    pub(crate) fn cookie_name(&self) -> &str {
+        self.inner.config.cookie.cookie_name()
+    }
+
     /// Whether the subject last proved who they are more than `max_age` ago. Use it to demand
     /// a fresh login before sensitive actions.
     pub fn requires_reauth(&self, session: &AuthSession<S>, max_age: Duration) -> bool {
