@@ -682,6 +682,39 @@ async fn purge_removes_expired_sessions_and_old_events() {
     assert_eq!(h.store.events().len(), 1);
 }
 
+/// Lets spawned tasks run until `done` holds (paused time never advances on its own).
+#[cfg(feature = "tokio")]
+async fn settle(done: impl Fn() -> bool) {
+    for _ in 0..100 {
+        if done() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("condition never held");
+}
+
+#[cfg(feature = "tokio")]
+#[tokio::test(start_paused = true)]
+async fn spawn_purge_purges_now_and_on_every_tick() {
+    let h = harness_with(GuardConfig::builder().idle_timeout(mins(60)).build().unwrap());
+    login(&h, Uuid::new_v4()).await;
+    h.advance(mins(61));
+    let task = h.guard.spawn_purge(mins(30));
+    settle(|| h.store.session_count() == 0).await;
+
+    login(&h, Uuid::new_v4()).await;
+    h.advance(mins(61));
+    tokio::time::advance(mins(29)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(h.store.session_count(), 1, "purged before the tick");
+    tokio::time::advance(mins(1)).await;
+    settle(|| h.store.session_count() == 0).await;
+
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+}
+
 // --- robustness and write behaviour ---
 
 #[tokio::test]

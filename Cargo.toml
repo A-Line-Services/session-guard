@@ -14,8 +14,8 @@ include = ["build.rs", "src/**/*", "migrations/**/*", "README.md", "CHANGELOG.md
 
 [features]
 default = []
-## Tower layer, `AuthSession` extractor and `ClientContext` extraction for axum 0.8.
-axum = ["dep:axum", "dep:http", "dep:tower-layer", "dep:tower-service"]
+## Tower layer, `AuthSession` and `Sessions` extractors and response impls for axum 0.8.
+axum = ["tokio", "dep:axum", "dep:http", "dep:tower-layer", "dep:tower-service"]
 ## PostgreSQL store (sqlx, runtime queries, embedded migrations).
 postgres = ["dep:sqlx"]
 ## Valkey / Redis store with atomic Lua rotation.
@@ -24,6 +24,8 @@ valkey = ["dep:redis"]
 maxmind = ["dep:maxminddb", "dep:arc-swap"]
 ## Counters per decision, signal and event via the `metrics` facade.
 metrics = ["dep:metrics"]
+## `Guard::spawn_purge` on the tokio runtime.
+tokio = ["dep:tokio"]
 ## `store_conformance!` suite and test helpers for custom store implementations.
 testing = []
 
@@ -51,6 +53,7 @@ maxminddb = { version = "0.32.0", optional = true }
 metrics = { version = "0.24.6", optional = true }
 redis = { version = "1.7.1", default-features = false, features = ["tokio-comp", "connection-manager", "script"], optional = true }
 sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "chrono", "uuid", "migrate", "macros", "ipnet", "json"], optional = true }
+tokio = { version = "1.53.2", default-features = false, features = ["rt", "time"], optional = true }
 tower-layer = { version = "0.3.3", optional = true }
 tower-service = { version = "0.3.3", optional = true }
 
@@ -63,7 +66,7 @@ proptest = "1.12.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "cookies"] }
 rovo = { version = "0.4.11", features = ["swagger"] }
 testcontainers = { version = "0.28.0", features = ["reusable-containers"] }
-tokio = { version = "1.53.2", features = ["full"] }
+tokio = { version = "1.53.2", features = ["full", "test-util"] }
 tower = { version = "0.5.3", features = ["util"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

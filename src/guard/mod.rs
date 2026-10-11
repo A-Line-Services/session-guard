@@ -560,6 +560,34 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         Ok(PurgeReport { sessions, events })
     }
 
+    /// Runs [`purge_expired`](Self::purge_expired) now and then every `every` on the tokio
+    /// runtime, logging each report (`info`) or failure (`warn`) with `tracing`. A failed run
+    /// does not stop the task; abort the handle to stop it.
+    ///
+    /// # Panics
+    ///
+    /// Outside a tokio runtime, or if `every` is zero.
+    #[cfg(feature = "tokio")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tokio")))]
+    pub fn spawn_purge(&self, every: Duration) -> tokio::task::JoinHandle<()> {
+        let guard = self.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(every);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                match guard.purge_expired().await {
+                    Ok(report) => tracing::info!(
+                        sessions = report.sessions,
+                        events = report.events,
+                        "purged expired sessions"
+                    ),
+                    Err(error) => tracing::warn!(%error, "purging expired sessions failed"),
+                }
+            }
+        })
+    }
+
     /// Builds the [`ClientContext`] for a request from the TCP peer address and the request
     /// headers.
     ///
