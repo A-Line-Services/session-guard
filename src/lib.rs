@@ -99,7 +99,7 @@ pub mod __bench {
 
 #[cfg(feature = "axum")]
 #[cfg_attr(docsrs, doc(cfg(feature = "axum")))]
-pub use crate::axum::{GuardLayer, GuardService};
+pub use crate::axum::{GuardLayer, GuardService, Sessions};
 pub use checks::{Check, Checks, Decision, Thresholds, UnknownCheck};
 pub use client::{ClientContext, HeaderSource, canonical_ip, resolve_client_ip};
 pub use clock::{Clock, ManualClock, SystemClock};

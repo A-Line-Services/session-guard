@@ -12,13 +12,14 @@ use axum::{
     extract::ConnectInfo,
     http::{HeaderMap, Request, StatusCode, header},
     response::Response,
-    routing::get,
+    routing::{get, post},
 };
 use chrono::{DateTime, TimeZone, Utc};
 use http_body_util::BodyExt;
 use session_guard::{
-    AuthSession, Checks, ClientContext, Guard, GuardConfig, GuardLayer, IpInfo, ManualClock, MemoryStore, Rejection,
-    SessionEvent, SessionRecord, SessionStore, StoreError, TokenHash, TokenLookup,
+    AuthSession, Checks, ClientContext, Guard, GuardConfig, GuardError, GuardLayer, IpInfo, IssuedToken, ManualClock,
+    MemoryStore, NewSession, Rejection, SessionEvent, SessionRecord, SessionStore, StoreError, TokenHash, TokenLookup,
+    axum::{LoggedOut, Sessions, StepUpError, StepUpFailure},
 };
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -119,6 +120,11 @@ impl Req {
 
     fn header(mut self, name: &str, value: &str) -> Self {
         self.builder = self.builder.header(name, value);
+        self
+    }
+
+    fn post(mut self) -> Self {
+        self.builder = self.builder.method("POST");
         self
     }
 
@@ -510,6 +516,200 @@ async fn client_context_helper() {
     assert_eq!(body(response).await, r#"{"error":"internal"}"#);
 }
 
+// --- Sessions extractor ---
+
+type Store = Arc<MemoryStore>;
+
+const USER: Uuid = Uuid::from_u128(1);
+const ABROAD: &str = "198.51.100.20";
+
+async fn sign_in(sessions: Sessions<Store>) -> Result<(NewSession, &'static str), GuardError> {
+    Ok((sessions.login(&USER).await?, "welcome"))
+}
+
+async fn sign_out(sessions: Sessions<Store>) -> Result<(LoggedOut, StatusCode), GuardError> {
+    Ok((sessions.logout().await?, StatusCode::NO_CONTENT))
+}
+
+/// Stands in for the app's credential check: the verified user comes from a header.
+async fn step_up(sessions: Sessions<Store>, headers: HeaderMap) -> Result<(IssuedToken, StatusCode), StepUpError> {
+    let verified: Uuid = header_str(&headers, "x-verified").unwrap().parse().unwrap();
+    Ok((sessions.complete_step_up(&verified).await?, StatusCode::NO_CONTENT))
+}
+
+fn session_app(h: &Harness) -> Router {
+    Router::new()
+        .route("/login", post(sign_in))
+        .route("/logout", post(sign_out))
+        .route("/step-up", post(step_up))
+        .merge(Router::new().route("/me", get(whoami)).layer(h.guard.layer()))
+        .with_state(h.guard.clone())
+}
+
+/// The only `Set-Cookie` of a response, as `name=value`.
+fn issued_cookie(response: &Response) -> String {
+    let cookies = set_cookies(response.headers());
+    assert_eq!(cookies.len(), 1, "{cookies:?}");
+    assert!(!is_clearing(&cookies[0]), "{cookies:?}");
+    cookie_pair(&cookies[0])
+}
+
+#[tokio::test]
+async fn sessions_login_sets_cookie() {
+    let h = harness();
+    let router = session_app(&h);
+    let response = send(&router, req("/login").post()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = issued_cookie(&response);
+    assert_eq!(header_str(response.headers(), "cache-control"), Some("no-store"));
+    assert_eq!(body(response).await, "welcome");
+    assert_eq!(
+        body(send(&router, req("/me").cookie(&cookie)).await).await,
+        USER.to_string()
+    );
+}
+
+#[tokio::test]
+async fn sessions_login_revokes_the_presented_session() {
+    let h = harness();
+    let router = session_app(&h);
+    let planted = login(&h, Uuid::new_v4()).await;
+    let response = send(&router, req("/login").post().cookie(&planted)).await;
+    let cookie = issued_cookie(&response);
+    assert_ne!(cookie, planted);
+    assert_eq!(
+        send(&router, req("/me").cookie(&planted)).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(send(&router, req("/me").cookie(&cookie)).await.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn sessions_logout_revokes_and_clears_cookie() {
+    let h = harness();
+    let router = session_app(&h);
+    let cookie = login(&h, USER).await;
+    let response = send(&router, req("/logout").post().cookie(&cookie)).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(set_cookies(response.headers()), [h.guard.clear_cookie()]);
+    assert_eq!(header_str(response.headers(), "cache-control"), Some("no-store"));
+    assert_eq!(
+        send(&router, req("/me").cookie(&cookie)).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Without a session there is nothing to revoke, but the cookie is still cleared.
+    let response = send(&router, req("/logout").post()).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(set_cookies(response.headers()), [h.guard.clear_cookie()]);
+}
+
+#[tokio::test]
+async fn sessions_step_up_issues_a_trusted_token() {
+    let h = harness();
+    let router = session_app(&h);
+    let cookie = login(&h, USER).await;
+    assert_rejected(
+        send(&router, req("/me").cookie(&cookie).from(ABROAD)).await,
+        "step_up_required",
+    )
+    .await;
+
+    let response = send(
+        &router,
+        req("/step-up")
+            .post()
+            .cookie(&cookie)
+            .from(ABROAD)
+            .header("x-verified", &USER.to_string()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(header_str(response.headers(), "cache-control"), Some("no-store"));
+    let fresh = issued_cookie(&response);
+    let me = send(&router, req("/me").cookie(&fresh).from(ABROAD)).await;
+    assert_eq!(body(me).await, USER.to_string());
+}
+
+#[tokio::test]
+async fn sessions_step_up_by_another_subject_is_403() {
+    let h = harness();
+    let router = session_app(&h);
+    let cookie = login(&h, USER).await;
+    let other = Uuid::from_u128(2).to_string();
+    let response = send(
+        &router,
+        req("/step-up")
+            .post()
+            .cookie(&cookie)
+            .from(ABROAD)
+            .header("x-verified", &other),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(header_str(response.headers(), "cache-control"), Some("no-store"));
+    assert_eq!(set_cookies(response.headers()), Vec::<String>::new());
+    assert_eq!(body(response).await, r#"{"error":"subject_mismatch"}"#);
+    // Nothing changed: the session still needs step-up.
+    assert_rejected(
+        send(&router, req("/me").cookie(&cookie).from(ABROAD)).await,
+        "step_up_required",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sessions_step_up_without_a_session_is_rejected() {
+    let h = harness();
+    let router = session_app(&h);
+    let user = USER.to_string();
+    let (cookies, _) = assert_rejected(
+        send(&router, req("/step-up").post().header("x-verified", &user)).await,
+        "not_authenticated",
+    )
+    .await;
+    assert_eq!(cookies, [h.guard.clear_cookie()]);
+
+    let (cookies, _) = assert_rejected(
+        send(
+            &router,
+            req("/step-up")
+                .post()
+                .cookie("__Host-sid=bogus")
+                .header("x-verified", &user),
+        )
+        .await,
+        "not_authenticated",
+    )
+    .await;
+    assert_eq!(cookies, [h.guard.clear_cookie()]);
+}
+
+#[tokio::test]
+async fn step_up_error_exposes_the_failure() {
+    use axum::extract::FromRequestParts;
+
+    let h = harness();
+    let cookie = login(&h, USER).await;
+    let (mut parts, _) = req("/step-up").cookie(&cookie).build().into_parts();
+    let sessions = Sessions::from_request_parts(&mut parts, &h.guard).await.unwrap();
+    assert_eq!(sessions.client().ip, HOME.parse::<IpAddr>().unwrap());
+    assert!(sessions.token().is_some());
+
+    let error = sessions.complete_step_up(&Uuid::from_u128(2)).await.unwrap_err();
+    assert!(matches!(error.failure(), StepUpFailure::SubjectMismatch));
+    assert_eq!(error.to_string(), "verified subject does not own the session");
+    assert!(!format!("{sessions:?}").contains(cookie.split('=').nth(1).unwrap()));
+}
+
+#[tokio::test]
+async fn sessions_without_connect_info_fail_closed() {
+    let h = harness();
+    let response = send(&session_app(&h), req("/login").post().no_connect_info()).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body(response).await, r#"{"error":"internal"}"#);
+}
+
 // --- store failures ---
 
 #[derive(Clone, Copy)]
@@ -563,4 +763,18 @@ async fn store_error_is_500_without_details() {
     let text = body(response).await;
     assert_eq!(text, r#"{"error":"internal"}"#);
     assert!(!text.contains("secret-host"));
+}
+
+#[tokio::test]
+async fn guard_error_is_500_without_details() {
+    async fn sign_in(sessions: Sessions<FailingStore>) -> Result<(NewSession, &'static str), GuardError> {
+        Ok((sessions.login(&USER).await?, "welcome"))
+    }
+    let router = Router::new()
+        .route("/login", post(sign_in))
+        .with_state(Guard::new(FailingStore));
+    let response = send(&router, req("/login").post()).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(header_str(response.headers(), "cache-control"), Some("no-store"));
+    assert_eq!(body(response).await, r#"{"error":"internal"}"#);
 }

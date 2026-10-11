@@ -34,6 +34,7 @@
 //! `{"error":"internal"}`; the error itself is only logged.
 
 use std::{
+    convert::Infallible,
     fmt,
     future::Future,
     net::{IpAddr, SocketAddr},
@@ -45,15 +46,18 @@ use std::{
 
 use ::axum::{
     body::Body,
-    extract::{ConnectInfo, FromRequestParts, OptionalFromRequestParts},
-    response::{IntoResponse, Response},
+    extract::{ConnectInfo, FromRef, FromRequestParts, OptionalFromRequestParts},
+    response::{IntoResponse, IntoResponseParts, Response, ResponseParts},
 };
 use http::{Extensions, HeaderMap, HeaderValue, Request, StatusCode, header, request::Parts};
+use secrecy::{ExposeSecret, SecretString};
 use tower_layer::Layer;
 use tower_service::Service;
+use uuid::Uuid;
 
 use crate::{
-    AuthSession, Checks, ClientContext, Guard, GuardError, Outcome, Rejection, store::SessionStore, subject::Subject,
+    AuthSession, Checks, ClientContext, Guard, GuardError, IssuedToken, NewSession, Outcome, Rejection, StepUpOutcome,
+    store::SessionStore, subject::Subject,
 };
 
 type Predicate = Arc<dyn Fn(&HeaderMap) -> bool + Send + Sync>;
@@ -379,7 +383,7 @@ fn guard_error(error: &GuardError) -> Response {
 ///
 /// Use it where the app talks to the guard itself, e.g. when
 /// [`Guard::complete_step_up`](crate::Guard::complete_step_up) returns
-/// [`StepUpOutcome::Rejected`](crate::StepUpOutcome::Rejected). The body is
+/// [`StepUpOutcome::Rejected`]. The body is
 /// `{"error":"<code>"}` with `Content-Type: application/json` and `Cache-Control: no-store`;
 /// `Set-Cookie` deletes the cookie when [`Rejection::clears_cookie`], and
 /// `Clear-Site-Data: "cookies"` is added when [`Rejection::clears_site_data`].
@@ -397,10 +401,14 @@ where
     St: SessionStore,
     S: Subject,
 {
+    rejection_with(rejection, &guard.clear_cookie())
+}
+
+fn rejection_with(rejection: Rejection, clear_cookie: &str) -> Response {
     let mut response = json_response(StatusCode::UNAUTHORIZED, rejection.as_str());
     let headers = response.headers_mut();
     if rejection.clears_cookie() {
-        append_set_cookie(headers, Some(&guard.clear_cookie()));
+        append_set_cookie(headers, Some(clear_cookie));
     }
     if rejection.clears_site_data() {
         headers.insert("clear-site-data", HeaderValue::from_static("\"cookies\""));
@@ -520,6 +528,292 @@ where
         _state: &A,
     ) -> impl Future<Output = Result<Option<Self>, Self::Rejection>> + Send {
         std::future::ready(Ok(parts.extensions.get::<AuthSession<S>>().cloned()))
+    }
+}
+
+/// Responses that set or delete the session cookie: append `Set-Cookie` and forbid caching.
+fn cookie_parts(mut parts: ResponseParts, set_cookie: &str) -> ResponseParts {
+    let headers = parts.headers_mut();
+    append_set_cookie(headers, Some(set_cookie));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    parts
+}
+
+/// Sends the token: appends its `Set-Cookie` and `Cache-Control: no-store`.
+///
+/// ```
+/// # use axum::http::StatusCode;
+/// # use session_guard::IssuedToken;
+/// fn respond(token: IssuedToken) -> impl axum::response::IntoResponse {
+///     (token, StatusCode::NO_CONTENT)
+/// }
+/// ```
+impl IntoResponseParts for IssuedToken {
+    type Error = Infallible;
+
+    fn into_response_parts(self, parts: ResponseParts) -> Result<ResponseParts, Self::Error> {
+        Ok(cookie_parts(parts, self.set_cookie()))
+    }
+}
+
+/// Sends the session's first token, like [`IssuedToken`].
+impl IntoResponseParts for NewSession {
+    type Error = Infallible;
+
+    fn into_response_parts(self, parts: ResponseParts) -> Result<ResponseParts, Self::Error> {
+        self.token.into_response_parts(parts)
+    }
+}
+
+/// A 500 with `{"error":"internal"}` and `Cache-Control: no-store`. The error itself is only
+/// logged, so store details never reach the client.
+impl IntoResponse for GuardError {
+    fn into_response(self) -> Response {
+        guard_error(&self)
+    }
+}
+
+/// Login, logout and step-up for handlers: the guard, the request's [`ClientContext`] and the
+/// session cookie it carries, in one extractor.
+///
+/// It takes the guard from the router state (anything with [`FromRef`] for
+/// [`Guard<St, S>`](Guard), including the guard itself) and needs
+/// [`ConnectInfo<SocketAddr>`] like the layer; without it the request fails closed with
+/// [`MissingConnectInfo`]. It does not authenticate anything, so put step-up routes outside the
+/// [`GuardLayer`]: the layer would answer `step_up_required` before the handler runs.
+///
+/// Every result converts into a response: [`NewSession`] and [`IssuedToken`] set the cookie,
+/// [`LoggedOut`] deletes it, and [`GuardError`] and [`StepUpError`] become the matching error.
+/// Verifying credentials, and rate limiting the routes that do, stays with the app.
+///
+/// ```no_run
+/// use std::net::SocketAddr;
+///
+/// use axum::{Router, http::StatusCode, routing::post};
+/// use session_guard::{
+///     Guard, GuardError, IssuedToken, MemoryStore, NewSession,
+///     axum::{LoggedOut, Sessions, StepUpError},
+/// };
+/// use uuid::Uuid;
+///
+/// // Stands in for the app's own credential check.
+/// async fn verify() -> Uuid {
+///     Uuid::nil()
+/// }
+///
+/// async fn login(sessions: Sessions<MemoryStore>) -> Result<(NewSession, StatusCode), GuardError> {
+///     let user = verify().await;
+///     Ok((sessions.login(&user).await?, StatusCode::NO_CONTENT))
+/// }
+///
+/// async fn step_up(sessions: Sessions<MemoryStore>) -> Result<(IssuedToken, StatusCode), StepUpError> {
+///     let user = verify().await;
+///     Ok((sessions.complete_step_up(&user).await?, StatusCode::NO_CONTENT))
+/// }
+///
+/// async fn logout(sessions: Sessions<MemoryStore>) -> Result<(LoggedOut, StatusCode), GuardError> {
+///     Ok((sessions.logout().await?, StatusCode::NO_CONTENT))
+/// }
+///
+/// # async fn run() -> std::io::Result<()> {
+/// let guard = Guard::new(MemoryStore::new());
+/// let app = Router::new()
+///     .route("/login", post(login))
+///     .route("/step-up", post(step_up))
+///     .route("/logout", post(logout))
+///     .with_state(guard);
+/// let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+/// axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await
+/// # }
+/// ```
+pub struct Sessions<St, S = Uuid> {
+    guard: Guard<St, S>,
+    client: ClientContext,
+    token: Option<SecretString>,
+}
+
+impl<St, S> fmt::Debug for Sessions<St, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sessions")
+            .field("client", &self.client)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
+    }
+}
+
+impl<St: SessionStore, S: Subject> Sessions<St, S> {
+    /// [`Guard::login`] for `subject`, revoking the session the request presented, if any.
+    /// Call it only after verifying the subject's credentials.
+    ///
+    /// # Errors
+    ///
+    /// As [`Guard::login`].
+    pub async fn login(&self, subject: &S) -> Result<NewSession, GuardError> {
+        self.guard.login(subject, &self.client, self.token()).await
+    }
+
+    /// [`Guard::logout`] for the presented session. The result deletes the cookie even when
+    /// there was no session to revoke.
+    ///
+    /// # Errors
+    ///
+    /// As [`Guard::logout`].
+    pub async fn logout(&self) -> Result<LoggedOut, GuardError> {
+        let revoked = match self.token() {
+            Some(token) => self.guard.logout(token, &self.client).await?,
+            None => false,
+        };
+        Ok(LoggedOut {
+            revoked,
+            clear_cookie: self.guard.clear_cookie(),
+        })
+    }
+
+    /// [`Guard::complete_step_up`] for the presented session, once the app has verified
+    /// `verified_subject`'s credentials again.
+    ///
+    /// # Errors
+    ///
+    /// A [`StepUpError`]: the subject does not own the session, there is no live session
+    /// (including no cookie at all), or the guard failed.
+    pub async fn complete_step_up(&self, verified_subject: &S) -> Result<IssuedToken, StepUpError> {
+        let failure = match self.token() {
+            None => StepUpFailure::Rejected(Rejection::NotAuthenticated),
+            Some(token) => match self.guard.complete_step_up(token, &self.client, verified_subject).await {
+                Ok(StepUpOutcome::Completed(token)) => return Ok(token),
+                Ok(StepUpOutcome::SubjectMismatch) => StepUpFailure::SubjectMismatch,
+                Ok(StepUpOutcome::Rejected(rejection)) => StepUpFailure::Rejected(rejection),
+                Err(error) => StepUpFailure::Guard(error),
+            },
+        };
+        Err(StepUpError {
+            failure,
+            clear_cookie: self.guard.clear_cookie(),
+        })
+    }
+
+    /// The guard, for anything else (listing or revoking sessions).
+    pub fn guard(&self) -> &Guard<St, S> {
+        &self.guard
+    }
+
+    /// The request's client context.
+    pub fn client(&self) -> &ClientContext {
+        &self.client
+    }
+
+    /// The session cookie's value, if the request carried one. Not validated.
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_ref().map(ExposeSecret::expose_secret)
+    }
+}
+
+impl<T, St, S> FromRequestParts<T> for Sessions<St, S>
+where
+    T: Send + Sync,
+    Guard<St, S>: FromRef<T>,
+    St: SessionStore,
+    S: Subject,
+{
+    type Rejection = MissingConnectInfo;
+
+    fn from_request_parts(parts: &mut Parts, state: &T) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        let guard = Guard::from_ref(state);
+        let sessions = client_context(&guard, parts).map(|client| {
+            let token = guard
+                .cookie_token(&parts.headers)
+                .map(|token| SecretString::from(token.to_owned()));
+            Self { guard, client, token }
+        });
+        std::future::ready(sessions)
+    }
+}
+
+/// Result of [`Sessions::logout`]. As response parts it deletes the cookie and sets
+/// `Cache-Control: no-store`.
+#[derive(Clone, Debug)]
+pub struct LoggedOut {
+    revoked: bool,
+    clear_cookie: String,
+}
+
+impl LoggedOut {
+    /// Whether a session was revoked; `false` when the request had none.
+    pub fn revoked(&self) -> bool {
+        self.revoked
+    }
+}
+
+impl IntoResponseParts for LoggedOut {
+    type Error = Infallible;
+
+    fn into_response_parts(self, parts: ResponseParts) -> Result<ResponseParts, Self::Error> {
+        Ok(cookie_parts(parts, &self.clear_cookie))
+    }
+}
+
+/// Why [`Sessions::complete_step_up`] failed. As a response:
+///
+/// - [`StepUpFailure::SubjectMismatch`]: 403 `{"error":"subject_mismatch"}`, cookie kept.
+/// - [`StepUpFailure::Rejected`]: the layer's 401 for that rejection (see
+///   [`rejection_response`]).
+/// - [`StepUpFailure::Guard`]: 500 `{"error":"internal"}`, the error only logged.
+#[derive(Debug)]
+pub struct StepUpError {
+    failure: StepUpFailure,
+    clear_cookie: String,
+}
+
+/// The cause of a [`StepUpError`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum StepUpFailure {
+    /// The verified subject does not own the session. Nothing changed.
+    SubjectMismatch,
+    /// There is no live session to step up.
+    Rejected(Rejection),
+    /// The guard failed.
+    Guard(GuardError),
+}
+
+impl StepUpError {
+    /// What went wrong.
+    pub fn failure(&self) -> &StepUpFailure {
+        &self.failure
+    }
+
+    /// What went wrong, by value.
+    pub fn into_failure(self) -> StepUpFailure {
+        self.failure
+    }
+}
+
+impl fmt::Display for StepUpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.failure {
+            StepUpFailure::SubjectMismatch => f.write_str("verified subject does not own the session"),
+            StepUpFailure::Rejected(rejection) => write!(f, "step-up rejected: {rejection}"),
+            StepUpFailure::Guard(_) => f.write_str("step-up failed"),
+        }
+    }
+}
+
+impl std::error::Error for StepUpError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.failure {
+            StepUpFailure::Guard(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl IntoResponse for StepUpError {
+    fn into_response(self) -> Response {
+        match self.failure {
+            StepUpFailure::SubjectMismatch => json_response(StatusCode::FORBIDDEN, "subject_mismatch"),
+            StepUpFailure::Rejected(rejection) => rejection_with(rejection, &self.clear_cookie),
+            StepUpFailure::Guard(error) => guard_error(&error),
+        }
     }
 }
 
