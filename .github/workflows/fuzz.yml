@@ -24,7 +24,7 @@ jobs:
       matrix:
         target: [cookie, xff, user_agent]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
         with:
@@ -33,10 +33,10 @@ jobs:
         with:
           tool: cargo-fuzz
       - name: Run ${{ matrix.target }}
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=300
+        run: cargo fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} fuzz/seeds/${{ matrix.target }} -- -max_total_time=300
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fuzz-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}

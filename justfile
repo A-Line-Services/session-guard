@@ -72,7 +72,7 @@ outdated:
     cargo upgrade --dry-run --incompatible
 
 msrv:
-    cargo +1.94 check --all-features
+    cargo +1.94 check --all-features --all-targets
 
 semver:
     cargo semver-checks

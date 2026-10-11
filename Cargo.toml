@@ -10,7 +10,7 @@ documentation = "https://docs.rs/session-guard"
 readme = "README.md"
 keywords = ["session", "authentication", "security", "axum", "cookie"]
 categories = ["authentication", "web-programming", "web-programming::http-server"]
-include = ["src/**/*", "migrations/**/*", "README.md", "CHANGELOG.md", "LICENSE-MIT", "LICENSE-APACHE"]
+include = ["build.rs", "src/**/*", "migrations/**/*", "README.md", "CHANGELOG.md", "LICENSE-MIT", "LICENSE-APACHE"]
 
 [features]
 default = []

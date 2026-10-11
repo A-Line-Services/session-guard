@@ -15,10 +15,29 @@ Recipes live in the [`justfile`](justfile) (run `just` to list them):
 | --------------- | ------------------------------------------------------------------- |
 | `just test`     | Unit, property, doc and in-memory store tests (no Docker).          |
 | `just test-all` | Everything, including Postgres/Valkey stores and e2e. Needs Docker (testcontainers). |
+| `just test-postgres` / `just test-valkey` / `just e2e` | One store suite or the end-to-end HTTP tests. Need Docker. |
+| `just test-clean` | Removes the Docker containers the store and e2e tests share. |
 | `just lint`     | `rustfmt --check` and clippy on all and no features.                |
 | `just hack`     | `cargo hack` over the feature powerset.                             |
 | `just fuzz`     | Fuzz a target, e.g. `just fuzz cookie 60` (nightly + `cargo-fuzz`). |
 | `just deny` / `just audit` | Supply chain checks.                                     |
+| `just doc-stable` / `just examples` / `just msrv` | Rustdoc with `-D warnings`, build the examples, check on Rust 1.94. |
+| `just ci`       | Roughly what CI runs: lint, test, docs and the feature powerset.    |
+
+### Docker for store tests
+
+The Postgres, Valkey and e2e tests start their servers with testcontainers, so
+Docker must be running. All tests share one container per image (labelled
+`session-guard.test`) and reuse it across runs; `just test-clean` removes them.
+Set `DATABASE_URL` and `VALKEY_URL` to use servers you already run instead
+(this is what CI does).
+
+### MSRV
+
+The minimum supported Rust version is 1.94 (`rust-version` in `Cargo.toml`),
+checked in CI with `cargo check --all-features --all-targets`. Raising it is a
+breaking-ish change: do it only when needed, note it in `CHANGELOG.md` and
+bump the minor version.
 
 ### MaxMind databases
 
