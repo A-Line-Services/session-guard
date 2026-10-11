@@ -566,9 +566,11 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
     /// right to left past trusted hops. Header values are capped at the configured length.
     pub fn client_context<H: HeaderSource + ?Sized>(&self, peer: IpAddr, headers: &H) -> ClientContext {
         let config = &self.inner.config;
+        // A non-UTF-8 value stays in the chain as an empty, unparseable hop, so the peer is used
+        // instead of whatever valid hops surround it.
         let forwarded: Vec<&str> = headers
             .header_values("x-forwarded-for")
-            .filter_map(|v| std::str::from_utf8(v).ok())
+            .map(|v| std::str::from_utf8(v).unwrap_or(""))
             .collect();
         if config.trusted_proxies.is_empty()
             && !forwarded.is_empty()

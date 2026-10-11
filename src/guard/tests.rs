@@ -758,6 +758,33 @@ fn client_context_honours_only_trusted_proxies() {
     assert_eq!(plain.client_context(ip("203.0.113.1"), &headers).ip, ip("203.0.113.1"));
 }
 
+/// Headers with raw byte values, which `&str` pairs cannot express.
+struct RawHeaders(Vec<(&'static str, &'static [u8])>);
+
+impl crate::HeaderSource for RawHeaders {
+    fn header_values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a [u8]> + 'a {
+        self.0
+            .iter()
+            .filter(move |(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| *v)
+    }
+}
+
+#[test]
+fn non_utf8_forwarded_for_falls_back_to_the_peer() {
+    let config = GuardConfig::builder()
+        .trusted_proxies(["10.0.0.0/8"])
+        .unwrap()
+        .build()
+        .unwrap();
+    let guard = Guard::builder(MemoryStore::new(), config).build();
+    let headers = RawHeaders(vec![
+        ("X-Forwarded-For", b"198.51.100.9"),
+        ("X-Forwarded-For", b"203.0.113.\xff"),
+    ]);
+    assert_eq!(guard.client_context(ip("10.0.0.1"), &headers).ip, ip("10.0.0.1"));
+}
+
 #[test]
 fn cookie_token_reads_the_configured_cookie() {
     let guard = Guard::new(MemoryStore::new());
