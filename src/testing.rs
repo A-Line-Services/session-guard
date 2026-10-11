@@ -52,6 +52,7 @@ macro_rules! store_conformance {
             current_rotation,
             newer_token_used_is_tracked,
             mark_used_sets_once,
+            mark_used_reaches_the_rotated_token,
             none_fields_are_preserved,
             prune_superseded_tokens,
             delete_session_removes_tokens,
@@ -369,6 +370,30 @@ pub async fn mark_used_sets_once<St: SessionStore>(store: St) {
     let found = store.find_by_token(&token).await.unwrap().unwrap();
     assert_eq!(found.token.first_used_at, Some(now + secs(3)));
     assert_eq!(found.session.last_seen_at, now + secs(9));
+}
+
+/// `mark_used` may name the token the same update's rotation inserts.
+pub async fn mark_used_reaches_the_rotated_token<St: SessionStore>(store: St) {
+    let now = now_secs();
+    let session = sample_session(now);
+    let first = random_hash();
+    store.insert_session(&session, &first).await.unwrap();
+    let second = random_hash();
+    let rotated = store
+        .apply(&SessionUpdate {
+            mark_used: Some(second),
+            ..rotate(
+                session.id,
+                now + secs(1),
+                rotation(second, Supersede::Exact(first), now),
+            )
+        })
+        .await
+        .unwrap();
+    assert!(rotated);
+    let found = store.find_by_token(&second).await.unwrap().unwrap();
+    assert_eq!(found.token.first_used_at, Some(now + secs(1)));
+    assert!(store.find_by_token(&first).await.unwrap().unwrap().newer_token_used);
 }
 
 /// `None` fields leave stored values alone; `Some` fields replace them.

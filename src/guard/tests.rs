@@ -249,6 +249,52 @@ async fn lost_rotation_response_is_reissued() {
 }
 
 #[tokio::test]
+async fn orphaned_token_is_reissued_only_once() {
+    let h = harness();
+    let t0 = login(&h, Uuid::new_v4()).await;
+    h.advance(mins(11));
+    // An attacker holding t0 drops every successor to keep t0 alive.
+    let _t1 = authenticated(h.guard.authenticate(&t0, &home()).await.unwrap())
+        .rotated
+        .unwrap();
+    h.advance(mins(1));
+    let _t2 = authenticated(h.guard.authenticate(&t0, &home()).await.unwrap())
+        .rotated
+        .unwrap();
+
+    h.advance(mins(1));
+    assert_eq!(
+        rejected(h.guard.authenticate(&t0, &home()).await.unwrap()),
+        Rejection::Revoked
+    );
+    assert_eq!(h.store.session_count(), 0);
+    assert_eq!(h.count(EventKind::TokenReissued), 1);
+    assert_eq!(h.count(EventKind::TokenReuse), 1);
+}
+
+#[tokio::test]
+async fn reissued_token_works_without_an_extra_write() {
+    let h = harness();
+    let t0 = login(&h, Uuid::new_v4()).await;
+    h.advance(mins(11));
+    let _lost = authenticated(h.guard.authenticate(&t0, &home()).await.unwrap())
+        .rotated
+        .unwrap();
+    h.advance(mins(1));
+    let t2 = authenticated(h.guard.authenticate(&t0, &home()).await.unwrap())
+        .rotated
+        .unwrap();
+    let lookup = h
+        .store
+        .find_by_token(&TokenHash::of(t2.expose()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(lookup.token.first_used_at.is_some(), "a reissued token counts as used");
+    authenticated(h.guard.authenticate(t2.expose(), &home()).await.unwrap());
+}
+
+#[tokio::test]
 async fn reuse_after_successor_was_used_revokes_the_session() {
     let h = harness();
     let t0 = login(&h, Uuid::new_v4()).await;

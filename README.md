@@ -26,7 +26,7 @@ Rotation is race-safe: the store applies it atomically, and when two requests pr
 | Outcome | When | Result |
 | --- | --- | --- |
 | Grace | Superseded less than the grace period ago | Accepted |
-| Orphaned | Superseded, and its successor was never presented (the reply was probably lost) | A fresh token is issued, a `token_reissued` event is recorded |
+| Orphaned | Superseded, and its successor was never presented (the reply was probably lost) | A fresh token is issued once, a `token_reissued` event is recorded; presenting it again counts as reuse |
 | Reuse | Superseded, and its successor was presented | Session revoked, a `token_reuse` event is recorded, `Rejection::Revoked` |
 
 Reuse is always enforced, even in shadow mode.
@@ -319,7 +319,7 @@ Not defended:
 - Real-time proxying through the victim's browser.
 - XSS acting inside the victim's page.
 
-**Orphan reissue.** If a superseded token's successor was never presented, the guard assumes the response was lost and rotates again instead of revoking. This gives the presenter a fresh token without proof that it is the legitimate client, so a thief who replays an orphaned token first gets a working session. The fingerprint checks still apply to that request, and the theft is detected as reuse once a token whose successor was used is presented again.
+**Orphan reissue.** If a superseded token's successor was never presented, the guard assumes the response was lost and rotates again instead of revoking. This gives the presenter a fresh token without proof that it is the legitimate client, so a thief who replays an orphaned token first gets a working session. The fingerprint checks still apply to that request. Each orphan is reissued only once: the fresh token counts as used from the start, so presenting the orphan again is reuse and revokes the session. A client that loses two rotation responses in a row is logged out.
 
 ### CSRF
 

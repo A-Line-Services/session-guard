@@ -158,7 +158,8 @@ pub trait SessionStore: Send + Sync + 'static {
     ///
     /// 1. If `rotation` is set and its [`Supersede`] condition holds for the current token:
     ///    supersede it, insert the new token as current, prune old superseded tokens.
-    /// 2. Mark `mark_used` used if it belongs to the session and is unused.
+    /// 2. Mark `mark_used` used if it belongs to the session and is unused; this includes the
+    ///    token step 1 just inserted.
     /// 3. Set `last_seen_at = now` and every `Some` field.
     ///
     /// A session must never have more than one current token. Returns whether the rotation

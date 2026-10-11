@@ -376,9 +376,14 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             }
             None => None,
         };
-        if state == TokenState::Current && lookup.token.first_used_at.is_none() {
-            update.mark_used = Some(hash);
-        }
+        // A reissued token counts as used from the start, so the orphan it replaces turns into
+        // reuse: one reissue per orphan, or a thief could keep a stolen token alive by
+        // dropping every successor.
+        update.mark_used = match (state, &update.rotation) {
+            (TokenState::Current, _) if lookup.token.first_used_at.is_none() => Some(hash),
+            (TokenState::Orphaned, Some(rotation)) => Some(rotation.new_token),
+            _ => None,
+        };
 
         let stale = now - session.last_seen_at >= config.last_seen_write_interval;
         let mut rotated = None;
