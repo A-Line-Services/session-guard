@@ -1,7 +1,7 @@
 //! A route for API keys instead of sessions.
 
 use axum::http::HeaderMap;
-use rovo::{extract::State, response::Json, rovo};
+use rovo::{response::Json, rovo};
 
 use crate::app::{
     errors::AppError,
@@ -24,8 +24,8 @@ use crate::app::{
 ///
 /// @tag api
 /// @security bearer
-#[rovo]
-pub async fn ping(State(_): State<AppState>, headers: HeaderMap) -> Result<Json<Pong>, AppError> {
+#[rovo(state = AppState)]
+pub async fn ping(headers: HeaderMap) -> Result<Json<Pong>, AppError> {
     if !has_api_key(&headers) {
         return Err(AppError::InvalidApiKey);
     }

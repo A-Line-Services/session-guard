@@ -1,6 +1,6 @@
 //! A sensitive action.
 
-use rovo::{extract::State, response::Json, rovo};
+use rovo::{response::Json, rovo};
 use session_guard::AuthSession;
 use uuid::Uuid;
 
@@ -18,8 +18,8 @@ use crate::app::{models::Transferred, state::AppState};
 /// # Metadata
 ///
 /// @tag account
-#[rovo]
-pub async fn transfer(State(_): State<AppState>, _session: AuthSession<Uuid>) -> Json<Transferred> {
+#[rovo(state = AppState)]
+pub async fn transfer(_session: AuthSession<Uuid>) -> Json<Transferred> {
     Json(Transferred {
         status: "transferred".to_owned(),
     })

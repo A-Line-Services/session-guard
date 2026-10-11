@@ -1317,7 +1317,7 @@ pub fn sensitive() -> rovo::Router<AppState> {
 ```rust
 //! Logging in and out, and stepping up.
 
-use rovo::{extract::State, response::Json, rovo};
+use rovo::{response::Json, rovo};
 use session_guard::{GuardError, IssuedToken, NewSession, Sessions, axum::LoggedOut};
 
 use crate::{
@@ -1344,9 +1344,8 @@ use crate::{
 /// # Metadata
 ///
 /// @tag auth
-#[rovo]
+#[rovo(state = AppState)]
 pub async fn login(
-    State(_): State<AppState>,
     sessions: Sessions<Store>,
     Json(credentials): Json<Credentials>,
 ) -> Result<(NewSession, Json<LoggedIn>), AppError> {
@@ -1371,11 +1370,8 @@ pub async fn login(
 /// # Metadata
 ///
 /// @tag auth
-#[rovo]
-pub async fn logout(
-    State(_): State<AppState>,
-    sessions: Sessions<Store>,
-) -> Result<(LoggedOut, Json<Done>), GuardError> {
+#[rovo(state = AppState)]
+pub async fn logout(sessions: Sessions<Store>) -> Result<(LoggedOut, Json<Done>), GuardError> {
     Ok((sessions.logout().await?, Json(Done { ok: true })))
 }
 
@@ -1395,9 +1391,8 @@ pub async fn logout(
 /// # Metadata
 ///
 /// @tag auth
-#[rovo]
+#[rovo(state = AppState)]
 pub async fn step_up(
-    State(_): State<AppState>,
     sessions: Sessions<Store>,
     Json(credentials): Json<Credentials>,
 ) -> Result<(IssuedToken, Json<Done>), AppError> {
@@ -1442,8 +1437,8 @@ use crate::app::{
 /// # Metadata
 ///
 /// @tag account
-#[rovo]
-pub async fn me(State(_): State<AppState>, session: AuthSession<Uuid>) -> Json<Me> {
+#[rovo(state = AppState)]
+pub async fn me(session: AuthSession<Uuid>) -> Json<Me> {
     Json(Me {
         subject: session.subject,
         session_id: session.session_id,
@@ -1515,7 +1510,7 @@ pub async fn revoke_session(
 ```rust
 //! A sensitive action.
 
-use rovo::{extract::State, response::Json, rovo};
+use rovo::{response::Json, rovo};
 use session_guard::AuthSession;
 use uuid::Uuid;
 
@@ -1533,8 +1528,8 @@ use crate::app::{models::Transferred, state::AppState};
 /// # Metadata
 ///
 /// @tag account
-#[rovo]
-pub async fn transfer(State(_): State<AppState>, _session: AuthSession<Uuid>) -> Json<Transferred> {
+#[rovo(state = AppState)]
+pub async fn transfer(_session: AuthSession<Uuid>) -> Json<Transferred> {
     Json(Transferred {
         status: "transferred".to_owned(),
     })
@@ -1549,7 +1544,7 @@ pub async fn transfer(State(_): State<AppState>, _session: AuthSession<Uuid>) ->
 //! A route for API keys instead of sessions.
 
 use axum::http::HeaderMap;
-use rovo::{extract::State, response::Json, rovo};
+use rovo::{response::Json, rovo};
 
 use crate::app::{
     errors::AppError,
@@ -1572,8 +1567,8 @@ use crate::app::{
 ///
 /// @tag api
 /// @security bearer
-#[rovo]
-pub async fn ping(State(_): State<AppState>, headers: HeaderMap) -> Result<Json<Pong>, AppError> {
+#[rovo(state = AppState)]
+pub async fn ping(headers: HeaderMap) -> Result<Json<Pong>, AppError> {
     if !has_api_key(&headers) {
         return Err(AppError::InvalidApiKey);
     }

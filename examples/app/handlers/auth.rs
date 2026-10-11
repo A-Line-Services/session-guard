@@ -1,6 +1,6 @@
 //! Logging in and out, and stepping up.
 
-use rovo::{extract::State, response::Json, rovo};
+use rovo::{response::Json, rovo};
 use session_guard::{GuardError, IssuedToken, NewSession, Sessions, axum::LoggedOut};
 
 use crate::{
@@ -27,9 +27,8 @@ use crate::{
 /// # Metadata
 ///
 /// @tag auth
-#[rovo]
+#[rovo(state = AppState)]
 pub async fn login(
-    State(_): State<AppState>,
     sessions: Sessions<Store>,
     Json(credentials): Json<Credentials>,
 ) -> Result<(NewSession, Json<LoggedIn>), AppError> {
@@ -54,11 +53,8 @@ pub async fn login(
 /// # Metadata
 ///
 /// @tag auth
-#[rovo]
-pub async fn logout(
-    State(_): State<AppState>,
-    sessions: Sessions<Store>,
-) -> Result<(LoggedOut, Json<Done>), GuardError> {
+#[rovo(state = AppState)]
+pub async fn logout(sessions: Sessions<Store>) -> Result<(LoggedOut, Json<Done>), GuardError> {
     Ok((sessions.logout().await?, Json(Done { ok: true })))
 }
 
@@ -78,9 +74,8 @@ pub async fn logout(
 /// # Metadata
 ///
 /// @tag auth
-#[rovo]
+#[rovo(state = AppState)]
 pub async fn step_up(
-    State(_): State<AppState>,
     sessions: Sessions<Store>,
     Json(credentials): Json<Credentials>,
 ) -> Result<(IssuedToken, Json<Done>), AppError> {

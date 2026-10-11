@@ -26,8 +26,8 @@ use crate::app::{
 /// # Metadata
 ///
 /// @tag account
-#[rovo]
-pub async fn me(State(_): State<AppState>, session: AuthSession<Uuid>) -> Json<Me> {
+#[rovo(state = AppState)]
+pub async fn me(session: AuthSession<Uuid>) -> Json<Me> {
     Json(Me {
         subject: session.subject,
         session_id: session.session_id,
