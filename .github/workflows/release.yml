@@ -93,9 +93,19 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       skipped: ${{ steps.release.outputs.skipped }}
     steps:
+      - name: Get token
+        id: get_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.A_LINE_CD_APP_ID }}
+          private-key: ${{ secrets.A_LINE_CD_TOKEN }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          token: ${{ steps.get_token.outputs.token }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -107,7 +117,7 @@ jobs:
         id: release
         uses: a-line-services/release-pilot@v1
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.get_token.outputs.token }}
           cargo-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   no-release:
