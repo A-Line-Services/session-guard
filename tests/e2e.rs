@@ -73,9 +73,9 @@ fn intel(ip: IpAddr) -> IpInfo {
     IpInfo::new(Some(country.into()), None)
 }
 
-/// Defaults for the tests: a `alb_` token prefix and nothing else changed.
+/// Defaults for the tests: a `sess_` token prefix and nothing else changed.
 fn config() -> GuardConfigBuilder {
-    GuardConfig::builder().token_prefix("alb_")
+    GuardConfig::builder().token_prefix("sess_")
 }
 
 async fn login_route<St: SessionStore>(
@@ -140,7 +140,7 @@ fn router<St: SessionStore>(guard: &Guard<St>) -> Router {
     let browser = Router::new()
         .route("/me", get(me))
         .route("/api/ping", get(probe))
-        .layer(guard.layer().bypass_bearer_prefixes(["alc_", "als_"]));
+        .layer(guard.layer().bypass_bearer_prefixes(["pat_", "svc_"]));
     let sensitive = Router::new()
         .route("/sensitive/me", get(me))
         .layer(guard.layer().require_recent_auth(Duration::from_mins(15)));
@@ -348,7 +348,7 @@ async fn login_sets_hardened_cookie<St: SessionStore>(store: St) {
     let resp = env.login_resp(user, None).await;
     assert_eq!(resp.status, StatusCode::OK);
     let set_cookie = &resp.set_cookies()[0];
-    assert!(set_cookie.starts_with("__Host-sid=alb_"), "{set_cookie}");
+    assert!(set_cookie.starts_with("__Host-sid=sess_"), "{set_cookie}");
     for attribute in ["Path=/", "HttpOnly", "Secure", "SameSite=Lax", "Max-Age="] {
         assert!(set_cookie.contains(attribute), "{attribute} missing in {set_cookie}");
     }
@@ -496,12 +496,12 @@ async fn logout_kills_the_token<St: SessionStore>(store: St) {
     assert_eq!(env.events_of(EventKind::Logout).len(), 1);
 }
 
-/// Scenario 7: API-key bearers bypass the guard untouched; a browser token needs the `alb_` prefix.
+/// Scenario 7: API-key bearers bypass the guard untouched; a browser token needs the `sess_` prefix.
 async fn bearer_bypass_and_token_prefix<St: SessionStore>(store: St) {
     let env = spawn(store, config()).await;
     let user = Uuid::new_v4();
 
-    for token in ["alc_whatever", "als_other"] {
+    for token in ["pat_whatever", "svc_other"] {
         let resp = send(
             env.req(Method::GET, "/api/ping")
                 .header(header::AUTHORIZATION, format!("Bearer {token}")),
@@ -526,7 +526,7 @@ async fn bearer_bypass_and_token_prefix<St: SessionStore>(store: St) {
     assert_eq!(resp.body, "guarded");
 
     // The bare token, without the configured prefix, is not a session token.
-    let bare = format!("{COOKIE_NAME}={}", pair_value(&cookie).strip_prefix("alb_").unwrap());
+    let bare = format!("{COOKIE_NAME}={}", pair_value(&cookie).strip_prefix("sess_").unwrap());
     assert!(!env.guard.is_session_token(pair_value(&bare)));
     let resp = send(env.get("/me", &bare)).await;
     assert_rejected(&resp, "not_authenticated");

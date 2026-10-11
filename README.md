@@ -244,8 +244,8 @@ A prefix makes tokens recognisable in logs and secret scanners. Tokens without i
 ```rust
 use session_guard::GuardConfig;
 
-let config = GuardConfig::builder().token_prefix("alb_").build().unwrap();
-assert_eq!(config.token_prefix(), Some("alb_"));
+let config = GuardConfig::builder().token_prefix("sess_").build().unwrap();
+assert_eq!(config.token_prefix(), Some("sess_"));
 ```
 
 If the same endpoints also accept API keys, tell the layer which requests to leave alone. Bypassed requests reach the inner service untouched (no `AuthSession`, no headers added) and your app authenticates them.
@@ -255,7 +255,7 @@ If the same endpoints also accept API keys, tell the layer which requests to lea
 # let guard = Guard::new(MemoryStore::new());
 let layer = guard
     .layer()
-    .bypass_bearer_prefixes(["alc_", "als_"])
+    .bypass_bearer_prefixes(["pat_", "svc_"])
     .bypass_when(|headers| headers.contains_key("x-api-key"));
 # let _ = layer;
 ```

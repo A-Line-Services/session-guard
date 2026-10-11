@@ -140,7 +140,7 @@ mod yours {
     const DEMO_PASSWORD: &str = "demo-password";
 
     /// An API key the app-side handler accepts, standing in for your key lookup.
-    const DEMO_API_KEY: &str = "alc_demo-key";
+    const DEMO_API_KEY: &str = "pat_demo-key";
 
     /// What the client sends to log in, and again to step up.
     #[derive(Deserialize, JsonSchema)]
@@ -422,7 +422,7 @@ mod yours {
 
     /// Ping with an API key.
     ///
-    /// Keys starting with `alc_` or `als_` skip session-guard entirely (see the layer's
+    /// Keys starting with `pat_` or `svc_` skip session-guard entirely (see the layer's
     /// `bypass_bearer_prefixes`), so this handler is the only thing judging them.
     ///
     /// # Responses
@@ -522,7 +522,7 @@ pub mod session {
             // client, which is right when nothing sits in front of the app.
             .trusted_proxies(["10.0.0.0/8", "172.16.0.0/12"])?
             // A recognizable prefix lets secret scanners find leaked session tokens.
-            .token_prefix("alb_")
+            .token_prefix("sess_")
             .build()
     }
 
@@ -561,7 +561,7 @@ pub mod session {
     /// API keys with these prefixes belong to an app-side handler, so the guard lets them
     /// through untouched (they get no `AuthSession`).
     pub fn layer(guard: &Guard<AnyStore>) -> GuardLayer<AnyStore, Uuid> {
-        guard.layer().bypass_bearer_prefixes(["alc_", "als_"])
+        guard.layer().bypass_bearer_prefixes(["pat_", "svc_"])
     }
 
     /// The layer for sensitive routes: strict risk checks, and a login no older than
@@ -863,7 +863,7 @@ mod tests {
         assert_eq!(anonymous.body, r#"{"error":"not_authenticated"}"#);
 
         let cookie = login(&app).await;
-        assert!(cookie.starts_with("sid=alb_"), "{cookie}");
+        assert!(cookie.starts_with("sid=sess_"), "{cookie}");
         let me = send(&app, call("GET", "/me").cookie(&cookie)).await;
         assert_eq!(me.status, StatusCode::OK);
         assert!(me.body.contains("00000000-0000-0000-0000-000000000001"), "{}", me.body);
@@ -934,18 +934,18 @@ mod tests {
     async fn api_key_prefixes_bypass_the_guard() {
         let app = app();
 
-        let ok = send(&app, call("GET", "/api/ping").bearer("alc_demo-key")).await;
+        let ok = send(&app, call("GET", "/api/ping").bearer("pat_demo-key")).await;
         assert_eq!(ok.status, StatusCode::OK);
         assert_eq!(ok.body, r#"{"auth":"api_key"}"#);
         assert!(!ok.headers.contains_key(header::SET_COOKIE));
 
         // The app-side handler judges the key; the guard stays out of it.
-        let bad = send(&app, call("GET", "/api/ping").bearer("alc_wrong")).await;
+        let bad = send(&app, call("GET", "/api/ping").bearer("pat_wrong")).await;
         assert_eq!(bad.status, StatusCode::UNAUTHORIZED);
         assert_eq!(bad.body, r#"{"error":"invalid_api_key"}"#);
 
         // A key is not a session: session-only routes still refuse it.
-        let me = send(&app, call("GET", "/me").bearer("alc_demo-key")).await;
+        let me = send(&app, call("GET", "/me").bearer("pat_demo-key")).await;
         assert_eq!(me.status, StatusCode::UNAUTHORIZED);
         assert_eq!(me.body, r#"{"error":"not_authenticated"}"#);
 

@@ -80,7 +80,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
     ///     .layer()
     ///     .with(Checks::strict())
     ///     .require_recent_auth(Duration::from_mins(15))
-    ///     .bypass_bearer_prefixes(["alc_", "als_"])
+    ///     .bypass_bearer_prefixes(["pat_", "svc_"])
     ///     .bypass_when(|headers: &HeaderMap| headers.contains_key("x-internal-probe"));
     /// let app = Router::new().route("/transfer", post(transfer)).layer(layer);
     ///

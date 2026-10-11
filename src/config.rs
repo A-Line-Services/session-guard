@@ -372,11 +372,11 @@ impl GuardConfigBuilder {
         self
     }
 
-    /// Prefix for issued tokens, such as `"alb_"`. Default none.
+    /// Prefix for issued tokens, such as `"sess_"`. Default none.
     ///
     /// The cookie value becomes the prefix followed by the usual 43 characters, and any presented
     /// token without the prefix is rejected before the store is consulted. Use it to tell browser
-    /// sessions apart from other credentials at a glance (for example `alc_` and `als_` API keys
+    /// sessions apart from other credentials at a glance (for example `pat_` and `svc_` API keys
     /// handled elsewhere), and to let secret scanners recognise leaked tokens. The prefix is not
     /// secret and is not part of the stored hash.
     pub fn token_prefix(mut self, prefix: impl Into<String>) -> Self {
@@ -560,9 +560,9 @@ mod tests {
     #[test]
     fn token_prefix_is_optional_and_validated() {
         assert_eq!(GuardConfig::default().token_prefix(), None);
-        let c = GuardConfig::builder().token_prefix("alb_").build().unwrap();
-        assert_eq!(c.token_prefix(), Some("alb_"));
-        for bad in ["", "al b_", "alb;", "alb=", "é_", &"a".repeat(33)] {
+        let c = GuardConfig::builder().token_prefix("sess_").build().unwrap();
+        assert_eq!(c.token_prefix(), Some("sess_"));
+        for bad in ["", "se ss_", "sess;", "sess=", "é_", &"a".repeat(33)] {
             assert_eq!(
                 GuardConfig::builder().token_prefix(bad).build().unwrap_err(),
                 ConfigError::InvalidTokenPrefix(bad.to_owned()),

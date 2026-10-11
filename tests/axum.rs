@@ -334,8 +334,8 @@ async fn missing_connect_info_fails_closed() {
 #[tokio::test]
 async fn bearer_prefix_bypasses_the_guard() {
     let h = harness();
-    let router = app(h.guard.layer().bypass_bearer_prefixes(["alc_", "als_"]));
-    for token in ["alc_abc", "als_xyz"] {
+    let router = app(h.guard.layer().bypass_bearer_prefixes(["pat_", "svc_"]));
+    for token in ["pat_abc", "svc_xyz"] {
         let response = send(
             &router,
             req("/probe")
@@ -354,10 +354,10 @@ async fn bearer_prefix_bypasses_the_guard() {
 async fn bypass_ignores_a_valid_cookie() {
     let h = harness();
     let cookie = login(&h, Uuid::new_v4()).await;
-    let router = app(h.guard.layer().bypass_bearer_prefixes(["alc_"]));
+    let router = app(h.guard.layer().bypass_bearer_prefixes(["pat_"]));
     let response = send(
         &router,
-        req("/probe").cookie(&cookie).header("authorization", "Bearer alc_abc"),
+        req("/probe").cookie(&cookie).header("authorization", "Bearer pat_abc"),
     )
     .await;
     assert_eq!(body(response).await, "bypassed");
@@ -366,8 +366,8 @@ async fn bypass_ignores_a_valid_cookie() {
 #[tokio::test]
 async fn non_matching_bearer_is_still_guarded() {
     let h = harness();
-    let router = app(h.guard.layer().bypass_bearer_prefixes(["alc_", "als_"]));
-    for auth in ["Bearer alb_abc", "Basic alc_abc", "Bearer", "alc_abc"] {
+    let router = app(h.guard.layer().bypass_bearer_prefixes(["pat_", "svc_"]));
+    for auth in ["Bearer sess_abc", "Basic pat_abc", "Bearer", "pat_abc"] {
         let response = send(&router, req("/probe").header("authorization", auth)).await;
         assert_rejected(response, "not_authenticated").await;
     }
@@ -376,8 +376,8 @@ async fn non_matching_bearer_is_still_guarded() {
 #[tokio::test]
 async fn bearer_scheme_is_case_insensitive() {
     let h = harness();
-    let router = app(h.guard.layer().bypass_bearer_prefixes(["alc_"]));
-    let response = send(&router, req("/probe").header("authorization", "bearer alc_abc")).await;
+    let router = app(h.guard.layer().bypass_bearer_prefixes(["pat_"]));
+    let response = send(&router, req("/probe").header("authorization", "bearer pat_abc")).await;
     assert_eq!(body(response).await, "bypassed");
 }
 

@@ -896,7 +896,7 @@ async fn concurrent_requests_with_one_token_rotate_once() {
 // --- token prefix ---
 
 fn prefixed() -> Harness {
-    harness_with(GuardConfig::builder().token_prefix("alb_").build().unwrap())
+    harness_with(GuardConfig::builder().token_prefix("sess_").build().unwrap())
 }
 
 #[tokio::test]
@@ -905,8 +905,8 @@ async fn prefixed_tokens_round_trip() {
     let user = Uuid::new_v4();
     let new = h.guard.login(&user, &home(), None).await.unwrap();
     let token = new.token.expose().to_owned();
-    assert_eq!(token.len(), 4 + 43);
-    assert!(token.starts_with("alb_"));
+    assert_eq!(token.len(), "sess_".len() + 43);
+    assert!(token.starts_with("sess_"));
     assert!(new.token.set_cookie().starts_with(&format!("__Host-sid={token};")));
     assert!(h.guard.is_session_token(&token));
     assert_eq!(
@@ -922,7 +922,7 @@ async fn prefixed_tokens_round_trip() {
     let t1 = authenticated(h.guard.authenticate(&token, &home()).await.unwrap())
         .rotated
         .unwrap();
-    assert!(t1.expose().starts_with("alb_"));
+    assert!(t1.expose().starts_with("sess_"));
     h.advance(mins(1));
     assert_eq!(
         rejected(h.guard.authenticate(t1.expose(), &abroad()).await.unwrap()),
@@ -931,15 +931,15 @@ async fn prefixed_tokens_round_trip() {
     let StepUpOutcome::Completed(t2) = h.guard.complete_step_up(t1.expose(), &abroad(), &user).await.unwrap() else {
         panic!("step-up should complete");
     };
-    assert!(t2.expose().starts_with("alb_"));
+    assert!(t2.expose().starts_with("sess_"));
 }
 
 #[tokio::test]
 async fn tokens_without_the_prefix_are_rejected() {
     let h = prefixed();
     let token = login(&h, Uuid::new_v4()).await;
-    let bare = token.strip_prefix("alb_").unwrap();
-    for other in [bare.to_owned(), format!("alc_{bare}"), format!("alb_alb_{bare}")] {
+    let bare = token.strip_prefix("sess_").unwrap();
+    for other in [bare.to_owned(), format!("pat_{bare}"), format!("sess_sess_{bare}")] {
         assert!(!h.guard.is_session_token(&other));
         assert_eq!(
             rejected(h.guard.authenticate(&other, &home()).await.unwrap()),

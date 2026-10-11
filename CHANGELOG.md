@@ -15,7 +15,7 @@ Initial release.
   revokes the session family. Tokens are 32 random bytes; only their SHA-256
   hash is stored, and comparisons are constant time. A token whose
   successor never arrived is reissued once, then treated as reuse.
-- Token prefixes: `GuardConfig::token_prefix` (for example `alb_`) marks
+- Token prefixes: `GuardConfig::token_prefix` (for example `sess_`) marks
   session tokens so they are distinguishable from other credentials and
   recognisable by secret scanners. `Guard::is_session_token` checks the shape
   without touching the store.
