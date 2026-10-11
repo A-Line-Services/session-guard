@@ -317,7 +317,7 @@ mod tests {
         let mut elsewhere = chrome_on_windows();
         elsewhere.ip_prefix = "198.51.100.0/24".to_owned();
         elsewhere.asn = Some(9999);
-        baseline.absorb(&elsewhere, now);
+        baseline.absorb(&elsewhere, now, &Checks::default());
 
         let back = chrome_on_windows();
         let soon = assess(

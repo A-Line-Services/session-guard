@@ -250,12 +250,11 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
     ///
     /// Store failures only. Bad tokens and risky clients are [`Outcome::Rejected`].
     pub async fn authenticate(&self, token: &str, ctx: &ClientContext) -> Result<Outcome<S>, GuardError> {
-        self.authenticate_inner(token, ctx, &self.inner.config.checks, true)
-            .await
+        self.authenticate_with(token, ctx, &self.inner.config.checks).await
     }
 
     /// Like [`authenticate`](Self::authenticate) with other checks, for routes that need
-    /// stricter (or looser) treatment. The baseline does not learn from these requests.
+    /// stricter (or looser) treatment. The baseline learns only the signals `checks` scored.
     ///
     /// # Errors
     ///
@@ -266,7 +265,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         ctx: &ClientContext,
         checks: &Checks,
     ) -> Result<Outcome<S>, GuardError> {
-        self.authenticate_inner(token, ctx, checks, false).await
+        self.authenticate_inner(token, ctx, checks).await
     }
 
     /// The rotation due for a token in `state`, with its replacement.
@@ -297,7 +296,6 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         token: &str,
         ctx: &ClientContext,
         checks: &Checks,
-        learn: bool,
     ) -> Result<Outcome<S>, GuardError> {
         let inner = &*self.inner;
         let config = &inner.config;
@@ -364,9 +362,9 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         }
 
         let mut update = SessionUpdate::touch(session.id, now);
-        if decision == Decision::Allow && learn {
+        if decision == Decision::Allow {
             let mut baseline = session.baseline.clone();
-            if baseline.absorb(&fingerprint, now) {
+            if baseline.absorb(&fingerprint, now, checks) {
                 update.baseline = Some(baseline);
             }
         }

@@ -750,6 +750,33 @@ async fn authenticate_with_no_checks_ignores_fingerprint() {
 }
 
 #[tokio::test]
+async fn authenticate_with_learns_the_signals_it_scored() {
+    let h = harness();
+    let t0 = login(&h, Uuid::new_v4()).await;
+    let german = || home().with_accept_language("de-DE");
+    let a = authenticated(
+        h.guard
+            .authenticate_with(&t0, &german(), &Checks::default())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(a.assessment.signals, vec![Check::AcceptLanguageChanged]);
+    let a = authenticated(h.guard.authenticate(&t0, &german()).await.unwrap());
+    assert_eq!(a.assessment.signals, vec![]);
+}
+
+#[tokio::test]
+async fn authenticate_with_does_not_learn_unscored_signals() {
+    let h = harness();
+    let t0 = login(&h, Uuid::new_v4()).await;
+    let german = || home().with_accept_language("de-DE");
+    let lax = Checks::default().disable(Check::AcceptLanguageChanged);
+    authenticated(h.guard.authenticate_with(&t0, &german(), &lax).await.unwrap());
+    let a = authenticated(h.guard.authenticate(&t0, &german()).await.unwrap());
+    assert_eq!(a.assessment.signals, vec![Check::AcceptLanguageChanged]);
+}
+
+#[tokio::test]
 async fn custom_subject_type() {
     let h = harness_typed::<String>(GuardConfig::default());
     let new = h.guard.login(&"tenant-1/ann".to_owned(), &home(), None).await.unwrap();

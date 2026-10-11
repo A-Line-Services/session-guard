@@ -189,8 +189,8 @@ impl<St, S> GuardLayer<St, S> {
     }
 
     /// Authenticates with `checks` through [`Guard::authenticate_with`] instead of the guard's
-    /// configured checks, e.g. [`Checks::strict`] for sensitive routes. Like
-    /// `authenticate_with`, the session's baseline does not learn from these requests.
+    /// configured checks, e.g. [`Checks::strict`] for sensitive routes. The session's baseline
+    /// learns only the signals `checks` scored.
     ///
     /// Without this, the layer calls [`Guard::authenticate`] with the configured checks.
     #[must_use]

@@ -7,7 +7,11 @@ use ipnet::IpNet;
 use quick_cache::sync::Cache;
 use serde::{Deserialize, Serialize};
 
-use crate::{client::ClientContext, intel::IpInfo};
+use crate::{
+    checks::{Check, Checks},
+    client::ClientContext,
+    intel::IpInfo,
+};
 
 /// Normalised client signals. Stored server-side only, never sent to the client.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,20 +101,33 @@ impl Baseline {
         }
     }
 
-    /// Learns soft signals from a request that was let through. Hard identity is never learned
-    /// and missing values never erase known ones. Returns whether anything changed.
-    pub fn absorb(&mut self, current: &Fingerprint, now: DateTime<Utc>) -> bool {
+    /// Learns soft signals from a request that was let through. Only signals that `checks`
+    /// scored are learned, so a route with looser checks cannot slip a change past stricter
+    /// ones. Hard identity is never learned and missing values never erase known ones. Returns
+    /// whether anything changed.
+    pub fn absorb(&mut self, current: &Fingerprint, now: DateTime<Utc>, checks: &Checks) -> bool {
         let before = self.clone();
         let fp = &mut self.fingerprint;
-        if fp.ip_prefix != current.ip_prefix && !current.ip_prefix.is_empty() {
+        let ip_scored = checks.scores(Check::IpPrefixChanged) || checks.scores(Check::IpPingPong);
+        if ip_scored && fp.ip_prefix != current.ip_prefix && !current.ip_prefix.is_empty() {
             self.previous_ip_prefix = Some(std::mem::replace(&mut fp.ip_prefix, current.ip_prefix.clone()));
             self.ip_changed_at = Some(now);
         }
-        keep_known(&mut fp.country, current.country.as_ref());
-        keep_known(&mut fp.asn, current.asn.as_ref());
-        keep_known(&mut fp.accept_language, current.accept_language.as_ref());
-        keep_known(&mut fp.tls, current.tls.as_ref());
-        fp.browser_major = fp.browser_major.max(current.browser_major);
+        if checks.scores(Check::CountryChanged) {
+            keep_known(&mut fp.country, current.country.as_ref());
+        }
+        if checks.scores(Check::AsnChanged) {
+            keep_known(&mut fp.asn, current.asn.as_ref());
+        }
+        if checks.scores(Check::AcceptLanguageChanged) {
+            keep_known(&mut fp.accept_language, current.accept_language.as_ref());
+        }
+        if checks.scores(Check::TlsChanged) {
+            keep_known(&mut fp.tls, current.tls.as_ref());
+        }
+        if checks.scores(Check::BrowserDowngraded) {
+            fp.browser_major = fp.browser_major.max(current.browser_major);
+        }
         *self != before
     }
 }
@@ -307,7 +324,7 @@ pub(crate) mod tests {
         moved.country = None;
         moved.browser_major = Some(140);
         moved.accept_language = None;
-        assert!(baseline.absorb(&moved, now));
+        assert!(baseline.absorb(&moved, now, &Checks::default()));
 
         let fp = &baseline.fingerprint;
         assert_eq!(fp.ip_prefix, "198.51.100.0/24");
@@ -327,14 +344,36 @@ pub(crate) mod tests {
         other.os = Some("Linux".into());
         other.ch_platform = Some("Linux".into());
         other.ch_mobile = Some(true);
-        assert!(!baseline.absorb(&other, Utc::now()));
+        assert!(!baseline.absorb(&other, Utc::now(), &Checks::default()));
         assert_eq!(baseline.fingerprint, base());
+    }
+
+    #[test]
+    fn absorb_learns_only_scored_signals() {
+        let original = base();
+        let mut baseline = Baseline::new(original.clone());
+        let mut moved = original.clone();
+        moved.ip_prefix = "198.51.100.0/24".to_owned();
+        moved.asn = Some(6848);
+        moved.accept_language = Some("de-DE".into());
+        let checks = Checks::default()
+            .disable(Check::AsnChanged)
+            .disable(Check::IpPrefixChanged)
+            .disable(Check::IpPingPong)
+            .weight(Check::AcceptLanguageChanged, 0);
+        assert!(!baseline.absorb(&moved, Utc::now(), &checks));
+        assert_eq!(baseline.fingerprint, original);
+
+        let ping_pong_only = Checks::none().enable(Check::IpPingPong);
+        assert!(baseline.absorb(&moved, Utc::now(), &ping_pong_only));
+        assert_eq!(baseline.fingerprint.ip_prefix, "198.51.100.0/24");
+        assert_eq!(baseline.fingerprint.asn, original.asn);
     }
 
     #[test]
     fn absorb_reports_no_change_for_identical_request() {
         let mut baseline = Baseline::new(base());
-        assert!(!baseline.absorb(&base(), Utc::now()));
+        assert!(!baseline.absorb(&base(), Utc::now(), &Checks::default()));
     }
 
     #[test]

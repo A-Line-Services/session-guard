@@ -188,6 +188,11 @@ impl Checks {
     pub const fn weight_of(&self, check: Check) -> Option<u32> {
         self.weights[check.index()]
     }
+
+    /// Whether `check` runs with a weight above zero.
+    pub(crate) const fn scores(&self, check: Check) -> bool {
+        matches!(self.weights[check.index()], Some(w) if w > 0)
+    }
 }
 
 /// What the score means.
