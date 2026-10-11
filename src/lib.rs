@@ -128,3 +128,7 @@ pub use store::{
 };
 pub use subject::Subject;
 pub use token::{SessionToken, TOKEN_LEN, TokenHash, is_well_formed};
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
