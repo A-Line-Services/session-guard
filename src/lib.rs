@@ -82,6 +82,9 @@ pub use guard::{
     SessionInfo, StepUpOutcome,
 };
 pub use intel::{IpInfo, IpIntel, NoIpIntel};
+#[cfg(feature = "maxmind")]
+#[cfg_attr(docsrs, doc(cfg(feature = "maxmind")))]
+pub use intel::{MaxMindDatabase, MaxMindError, MaxMindIntel};
 pub use risk::{Assessment, assess};
 pub use store::{
     MemoryStore, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord,

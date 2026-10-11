@@ -20,6 +20,24 @@ Recipes live in the [`justfile`](justfile) (run `just` to list them):
 | `just fuzz`     | Fuzz a target, e.g. `just fuzz cookie 60` (nightly + `cargo-fuzz`). |
 | `just deny` / `just audit` | Supply chain checks.                                     |
 
+### MaxMind databases
+
+The `maxmind` unit tests build tiny MMDB files in memory. To also smoke-test
+against real databases, point these at local copies (the test is skipped when
+unset):
+
+```sh
+SESSION_GUARD_MAXMIND_TEST_DB=/var/lib/GeoIP/GeoLite2-City.mmdb \
+SESSION_GUARD_MAXMIND_TEST_ASN_DB=/var/lib/GeoIP/GeoLite2-ASN.mmdb \
+  cargo test --lib --features maxmind real_database_from_env
+```
+
+### Benchmarks and fuzzing
+
+`just bench` runs the criterion benches in `benches/`. Fuzz targets live in
+`fuzz/` (`cookie`, `xff`, `user_agent`) with seed inputs in `fuzz/seeds/`;
+`just fuzz xff 60` runs one for a minute.
+
 Code must be formatted with `rustfmt` and pass clippy (`pedantic`) with
 `-D warnings`. Public items need docs.
 
