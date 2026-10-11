@@ -209,6 +209,11 @@ impl<St, S> GuardLayer<St, S> {
     /// is still delivered. Complete the step-up with
     /// [`Guard::complete_step_up`](crate::Guard::complete_step_up) to refresh
     /// `authenticated_at`.
+    ///
+    /// The window must leave room for the retry after the step-up: with a zero `max_age` that
+    /// retry is already too late, so the route can never be reached. To confirm every single
+    /// action (deleting an account, say), verify the credential in that request's handler
+    /// instead, or use a short window such as two minutes.
     #[must_use]
     pub fn require_recent_auth(self, max_age: Duration) -> Self {
         self.update(|s| s.recent_auth = Some(max_age))

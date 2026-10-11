@@ -217,6 +217,7 @@ match guard.complete_step_up(token, &ctx, &user).await? {
 `complete_step_up` trusts the subject you pass, so call it only after your own verification succeeded. A session waiting for step-up keeps aging: if the idle timeout passes first, it expires and the user logs in again.
 
 To demand a recent proof of identity on sensitive routes, use `guard.layer().require_recent_auth(Duration::from_secs(300))`; older sessions get `step_up_required` with the cookie kept.
+A zero window can never be met, since the retry after a step-up is already later; to confirm each action (such as a delete), verify the credential in that handler instead.
 
 ## Cookie format
 

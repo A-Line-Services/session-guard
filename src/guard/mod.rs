@@ -639,6 +639,9 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
 
     /// Whether the subject last proved who they are more than `max_age` ago. Use it to demand
     /// a fresh login before sensitive actions.
+    ///
+    /// With a zero `max_age` it is true as soon as any time has passed since the login or
+    /// step-up, so it is true for practically every request.
     pub fn requires_reauth(&self, session: &AuthSession<S>, max_age: Duration) -> bool {
         self.now() - session.authenticated_at > td(max_age)
     }
