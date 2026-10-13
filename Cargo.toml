@@ -1,6 +1,6 @@
 [package]
 name = "session-guard"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.94"
 description = "Stolen session cookies become useless: rotating tokens with reuse detection and risk-based step-up for Rust web apps."
