@@ -573,8 +573,11 @@ You, as the controller, decide the legal basis, the retention you configure, and
 
 Enable `maxmind` and give the guard an `IpIntel` source. Without one, IP changes are judged by network prefix only.
 
+`MaxMindIntel` reads the databases into memory, so lookups never touch the disk. `geoipupdate` (a cron job, a sidecar or an auto-updated volume) replaces the files when MaxMind publishes new ones, and the guard only sees them after a reload. With the `tokio` feature, `spawn_reload` checks the files on an interval and reloads them when they change:
+
 ```rust,no_run
 use std::sync::Arc;
+use std::time::Duration;
 
 use session_guard::{Guard, GuardConfig, MaxMindIntel, MemoryStore};
 
@@ -582,14 +585,18 @@ let country = "/var/lib/GeoIP/GeoLite2-Country.mmdb";
 let asn = "/var/lib/GeoIP/GeoLite2-ASN.mmdb";
 let intel = Arc::new(MaxMindIntel::open(country, Some(asn)).unwrap());
 
-// The guard shares the source; keep the handle to reload it.
+// Check the files hourly; lookups stay lock-free while a reload swaps the databases.
+intel.spawn_reload(Duration::from_secs(60 * 60));
+
+// The guard shares the source with the reload task.
 let guard = Guard::builder(MemoryStore::new(), GuardConfig::default())
     .ip_intel(Arc::clone(&intel))
     .build();
-
-// After geoipupdate, swap the databases without a restart; lookups stay lock-free.
-intel.reload(country, Some(asn)).unwrap();
 ```
+
+- A change is detected from each file's modification time and size, not from file system events, so it also works on network file systems and Kubernetes volumes. A check of unchanged files costs one `stat` per file.
+- A file that fails to load (missing, or only partly written) leaves the current databases in place and is retried on the next tick. Reloads are logged at `info` and failures at `warn` through `tracing`.
+- Without tokio, call `intel.reload_if_changed()` from your own scheduler, off the async runtime since it reads the files when they changed. `reload(paths)` and `reload_from_bytes` swap the databases unconditionally.
 
 If you never reload, pass the `MaxMindIntel` itself to `ip_intel`. Any closure `Fn(IpAddr) -> IpInfo`, and any `Arc` of an `IpIntel`, is an `IpIntel`.
 

@@ -2,6 +2,7 @@
 
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 use super::*;
 
@@ -261,6 +262,141 @@ fn reload_swaps_databases_and_failed_reload_keeps_the_old_ones() {
     let country = temp_file("reload.mmdb", &mmdb::country("GeoLite2-Country", "DE"));
     intel.reload(&country, None::<&str>).unwrap();
     assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("DE"), None));
+    std::fs::remove_file(country).unwrap();
+}
+
+/// A modification time `secs` after the epoch, so change detection in the tests does not hinge
+/// on the file system's timestamp resolution.
+fn at(secs: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+}
+
+/// Writes `path` with the given contents and modification time.
+fn write_file(path: &Path, bytes: &[u8], modified: SystemTime) {
+    std::fs::write(path, bytes).unwrap();
+    let file = std::fs::File::options().write(true).open(path).unwrap();
+    file.set_modified(modified).unwrap();
+}
+
+/// Replaces `path` the way `geoipupdate` does: write a sibling file, then rename it over.
+fn replace_file(path: &Path, bytes: &[u8], modified: SystemTime) {
+    let staged = path.with_extension("staged");
+    write_file(&staged, bytes, modified);
+    std::fs::rename(&staged, path).unwrap();
+}
+
+#[test]
+fn reload_if_changed_leaves_unchanged_files_unread() {
+    let country = temp_file("unchanged.mmdb", &[]);
+    let bytes = mmdb::country("GeoLite2-Country", "BE");
+    write_file(&country, &bytes, at(1));
+    let intel = MaxMindIntel::open(&country, None::<&str>).unwrap();
+    assert!(!intel.reload_if_changed().unwrap());
+
+    // Same size and modification time: the contents are not even read.
+    write_file(&country, &vec![0; bytes.len()], at(1));
+    assert!(!intel.reload_if_changed().unwrap());
+    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("BE"), None));
+    std::fs::remove_file(country).unwrap();
+}
+
+#[test]
+fn reload_if_changed_picks_up_replaced_files() {
+    let country = temp_file("replaced-country.mmdb", &mmdb::country("GeoLite2-Country", "BE"));
+    let asn = temp_file("replaced-asn.mmdb", &mmdb::asn(1));
+    let intel = MaxMindIntel::open(&country, Some(&asn)).unwrap();
+
+    replace_file(&country, &mmdb::country("GeoLite2-Country", "FR"), at(2));
+    assert!(intel.reload_if_changed().unwrap());
+    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("FR"), Some(1)));
+    assert!(!intel.reload_if_changed().unwrap());
+
+    // A change to the ASN database alone is enough.
+    replace_file(&asn, &mmdb::asn(2), at(3));
+    assert!(intel.reload_if_changed().unwrap());
+    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("FR"), Some(2)));
+    assert!(!intel.reload_if_changed().unwrap());
+
+    std::fs::remove_file(country).unwrap();
+    std::fs::remove_file(asn).unwrap();
+}
+
+#[test]
+fn reload_if_changed_keeps_the_old_databases_and_retries_after_a_failure() {
+    let country = temp_file("retry.mmdb", &mmdb::country("GeoLite2-Country", "BE"));
+    let intel = MaxMindIntel::open(&country, None::<&str>).unwrap();
+
+    // A writer that is still busy with the file, then a file briefly gone during a swap.
+    write_file(&country, b"half a database", at(2));
+    assert!(intel.reload_if_changed().is_err());
+    assert!(intel.reload_if_changed().is_err(), "a failed reload is retried");
+    std::fs::remove_file(&country).unwrap();
+    assert!(matches!(intel.reload_if_changed(), Err(MaxMindError::Io { .. })));
+    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("BE"), None));
+
+    write_file(&country, &mmdb::country("GeoLite2-Country", "DE"), at(2));
+    assert!(intel.reload_if_changed().unwrap());
+    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("DE"), None));
+    std::fs::remove_file(country).unwrap();
+}
+
+#[test]
+fn reload_if_changed_follows_the_files_of_the_last_reload() {
+    let intel = MaxMindIntel::from_bytes(mmdb::country("GeoLite2-Country", "BE"), None).unwrap();
+    assert!(
+        !intel.reload_if_changed().unwrap(),
+        "databases from bytes have no files"
+    );
+
+    let first = temp_file("first.mmdb", &mmdb::country("GeoLite2-Country", "FR"));
+    let second = temp_file("second.mmdb", &mmdb::country("GeoLite2-Country", "DE"));
+    intel.reload(&first, None::<&str>).unwrap();
+    intel.reload(&second, None::<&str>).unwrap();
+    replace_file(&first, &mmdb::country("GeoLite2-Country", "NL"), at(2));
+    assert!(!intel.reload_if_changed().unwrap());
+    replace_file(&second, &mmdb::country("GeoLite2-Country", "LU"), at(2));
+    assert!(intel.reload_if_changed().unwrap());
+    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("LU"), None));
+
+    intel
+        .reload_from_bytes(mmdb::country("GeoLite2-Country", "BE"), None)
+        .unwrap();
+    replace_file(&second, &mmdb::country("GeoLite2-Country", "AT"), at(3));
+    assert!(!intel.reload_if_changed().unwrap(), "bytes replace the files");
+    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("BE"), None));
+
+    std::fs::remove_file(first).unwrap();
+    std::fs::remove_file(second).unwrap();
+}
+
+/// Waits (in real time) until `ip` resolves to `expected`.
+#[cfg(feature = "tokio")]
+async fn eventually_resolves(intel: &MaxMindIntel, expected: IpInfo) {
+    for _ in 0..500 {
+        if intel.lookup(ip("1.2.3.4")) == expected {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("never resolved to {expected:?}");
+}
+
+#[cfg(feature = "tokio")]
+#[tokio::test]
+async fn spawn_reload_picks_up_changes_and_survives_failures() {
+    let country = temp_file("spawned.mmdb", &mmdb::country("GeoLite2-Country", "BE"));
+    let intel = Arc::new(MaxMindIntel::open(&country, None::<&str>).unwrap());
+    let task = intel.spawn_reload(Duration::from_millis(10));
+
+    replace_file(&country, b"garbage", at(2));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("BE"), None));
+
+    replace_file(&country, &mmdb::country("GeoLite2-Country", "FR"), at(3));
+    eventually_resolves(&intel, info(Some("FR"), None)).await;
+
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
     std::fs::remove_file(country).unwrap();
 }
 
