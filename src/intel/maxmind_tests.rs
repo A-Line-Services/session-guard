@@ -103,18 +103,21 @@ mod mmdb {
         out
     }
 
+    /// A City edition names the city; a Country edition has no `city` at all.
     pub fn country(database_type: &str, iso: &str) -> Vec<u8> {
-        let record = map(&[
-            ("city", map(&[("geoname_id", u32(2_800_866))])),
-            ("country", map(&[("iso_code", string(iso))])),
-        ]);
-        build(database_type, Some(record), None)
+        let mut pairs = Vec::new();
+        if database_type.contains("City") {
+            let names = map(&[("de", string("Brüssel")), ("en", string(super::CITY))]);
+            pairs.push(("city", map(&[("geoname_id", u32(2_800_866)), ("names", names)])));
+        }
+        pairs.push(("country", map(&[("iso_code", string(iso))])));
+        build(database_type, Some(map(&pairs)), None)
     }
 
     pub fn asn(number: u32) -> Vec<u8> {
         let record = map(&[
             ("autonomous_system_number", u32(number)),
-            ("autonomous_system_organization", string("Example")),
+            ("autonomous_system_organization", string(super::NETWORK)),
         ]);
         build("GeoLite2-ASN", Some(record), None)
     }
@@ -132,6 +135,11 @@ mod mmdb {
 fn ip(s: &str) -> IpAddr {
     s.parse().unwrap()
 }
+
+/// The city every City-edition fixture names.
+const CITY: &str = "Brussels";
+/// The organization every ASN fixture names.
+const NETWORK: &str = "Example Telecom";
 
 fn info(country: Option<&str>, asn: Option<u32>) -> IpInfo {
     IpInfo::new(country.map(str::to_owned), asn)
@@ -152,13 +160,41 @@ fn country_database_yields_iso_code() {
 #[test]
 fn city_database_is_accepted_for_country() {
     let intel = MaxMindIntel::from_bytes(mmdb::country("GeoLite2-City", "NL"), None).unwrap();
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("NL"), None));
+    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("NL"), None).with_city(CITY));
+}
+
+#[test]
+fn city_database_yields_the_city() {
+    let intel = MaxMindIntel::from_bytes(mmdb::country("GeoIP2-City", "BE"), None).unwrap();
+    assert_eq!(intel.lookup(ip("1.2.3.4")).city.as_deref(), Some(CITY));
+}
+
+#[test]
+fn country_database_yields_no_city() {
+    let intel = MaxMindIntel::from_bytes(mmdb::country("GeoLite2-Country", "BE"), None).unwrap();
+    assert_eq!(intel.lookup(ip("1.2.3.4")).city, None);
 }
 
 #[test]
 fn asn_database_yields_number() {
     let intel = MaxMindIntel::from_bytes(mmdb::country("GeoIP2-Country", "BE"), Some(mmdb::asn(5432))).unwrap();
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("BE"), Some(5432)));
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("BE"), Some(5432)).with_network(NETWORK)
+    );
+}
+
+#[test]
+fn asn_database_yields_the_network_name() {
+    let intel = MaxMindIntel::from_bytes(mmdb::country("GeoLite2-Country", "BE"), Some(mmdb::asn(5432))).unwrap();
+    assert_eq!(intel.lookup(ip("1.2.3.4")).network.as_deref(), Some(NETWORK));
+}
+
+#[test]
+fn no_asn_database_yields_no_network() {
+    let intel = MaxMindIntel::from_bytes(mmdb::country("GeoLite2-City", "BE"), None).unwrap();
+    let found = intel.lookup(ip("1.2.3.4"));
+    assert_eq!((found.asn, found.network), (None, None));
 }
 
 #[test]
@@ -171,7 +207,10 @@ fn unknown_addresses_yield_empty_info() {
 fn ipv6_in_ipv4_database_yields_empty_info_and_mapped_addresses_resolve() {
     let intel = MaxMindIntel::from_bytes(mmdb::country("GeoLite2-Country", "BE"), Some(mmdb::asn(5432))).unwrap();
     assert_eq!(intel.lookup(ip("2001:db8::1")), IpInfo::default());
-    assert_eq!(intel.lookup(ip("::ffff:1.2.3.4")), info(Some("BE"), Some(5432)));
+    assert_eq!(
+        intel.lookup(ip("::ffff:1.2.3.4")),
+        info(Some("BE"), Some(5432)).with_network(NETWORK)
+    );
 }
 
 #[test]
@@ -253,7 +292,10 @@ fn opens_files() {
     let country = temp_file("country.mmdb", &mmdb::country("GeoLite2-City", "BE"));
     let asn = temp_file("asn.mmdb", &mmdb::asn(64_500));
     let intel = MaxMindIntel::open(&country, Some(&asn)).unwrap();
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("BE"), Some(64_500)));
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("BE"), Some(64_500)).with_city(CITY).with_network(NETWORK)
+    );
     std::fs::remove_file(country).unwrap();
     std::fs::remove_file(asn).unwrap();
 }
@@ -265,12 +307,18 @@ fn reload_swaps_databases_and_failed_reload_keeps_the_old_ones() {
     intel
         .reload_from_bytes(mmdb::country("GeoLite2-Country", "FR"), Some(mmdb::asn(7)))
         .unwrap();
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("FR"), Some(7)));
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("FR"), Some(7)).with_network(NETWORK)
+    );
 
     assert!(intel.reload_from_bytes(b"garbage".to_vec(), None).is_err());
     let missing = std::env::temp_dir().join("session-guard-missing-reload.mmdb");
     assert!(intel.reload(&missing, None::<&str>).is_err());
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("FR"), Some(7)));
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("FR"), Some(7)).with_network(NETWORK)
+    );
 
     let country = temp_file("reload.mmdb", &mmdb::country("GeoLite2-Country", "DE"));
     intel.reload(&country, None::<&str>).unwrap();
@@ -321,13 +369,19 @@ fn reload_if_changed_picks_up_replaced_files() {
 
     replace_file(&country, &mmdb::country("GeoLite2-Country", "FR"), at(2));
     assert!(intel.reload_if_changed().unwrap());
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("FR"), Some(1)));
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("FR"), Some(1)).with_network(NETWORK)
+    );
     assert!(!intel.reload_if_changed().unwrap());
 
     // A change to the ASN database alone is enough.
     replace_file(&asn, &mmdb::asn(2), at(3));
     assert!(intel.reload_if_changed().unwrap());
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("FR"), Some(2)));
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("FR"), Some(2)).with_network(NETWORK)
+    );
     assert!(!intel.reload_if_changed().unwrap());
 
     std::fs::remove_file(country).unwrap();
@@ -480,7 +534,9 @@ fn unlisted_addresses_are_direct_and_unknown_without_an_anonymizer() {
         .unwrap();
     assert_eq!(
         intel.lookup(ip("1.2.3.4")),
-        info(Some("BE"), Some(5432)).with_anonymity(Anonymity::Vpn)
+        info(Some("BE"), Some(5432))
+            .with_network(NETWORK)
+            .with_anonymity(Anonymity::Vpn)
     );
     assert_eq!(anonymity(&intel, "200.1.2.3"), Some(Anonymity::Direct));
     assert_eq!(anonymity(&intel, "2001:db8::1"), None, "a failed lookup is unknown");
@@ -670,6 +726,10 @@ fn real_database_from_env() {
     assert_eq!(found.country.as_deref(), Some("US"));
     if asn.is_some() {
         assert_eq!(found.asn, Some(15169));
+        assert!(
+            found.network.as_deref().is_some_and(|name| name.contains("GOOGLE")),
+            "{found:?}"
+        );
     }
     assert_eq!(intel.lookup(ip("10.0.0.1")), IpInfo::default());
 }

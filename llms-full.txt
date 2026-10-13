@@ -282,7 +282,7 @@ Then open <http://127.0.0.1:3000/swagger> and log in with `demo` / `demo-passwor
 | `tokio` | `Guard::spawn_purge`, a background task that purges expired sessions |
 | `postgres` | `PgStore` on sqlx, with embedded migrations |
 | `valkey` | `ValkeyStore` for Valkey or Redis, with atomic Lua rotation (a single primary; Cluster mode is not supported) |
-| `maxmind` | `MaxMindIntel`: country, ASN and anonymizers from GeoLite2 / GeoIP2 databases |
+| `maxmind` | `MaxMindIntel`: country, city, ASN, network name and anonymizers from GeoLite2 / GeoIP2 databases |
 | `metrics` | Counters through the `metrics` facade |
 | `testing` | The `store_conformance!` suite and helpers for custom stores |
 
@@ -575,6 +575,8 @@ You, as the controller, decide the legal basis, the retention you configure, and
 ## MaxMind
 
 Enable `maxmind` and give the guard an `IpIntel` source. Without one, IP changes are judged by network prefix only.
+
+A lookup returns an `IpInfo` with the ISO country code (City or Country edition), the English city name (City edition only), the autonomous system number and its organization name, e.g. `"Example Telecom"` (ASN database), and the anonymity (see [Anonymizers](#anonymizers)). The guard neither scores nor stores the city and network name; they are there for the app, e.g. to describe where a sign-in came from.
 
 `MaxMindIntel` reads the databases into memory, so lookups never touch the disk. `geoipupdate` (a cron job, a sidecar or an auto-updated volume) replaces the files when MaxMind publishes new ones, and the guard only sees them after a reload. With the `tokio` feature, `spawn_reload` checks the files on an interval and reloads them when they change:
 

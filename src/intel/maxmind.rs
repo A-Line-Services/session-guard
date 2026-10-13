@@ -16,9 +16,10 @@ use super::{Anonymity, IpInfo, IpIntel};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MaxMindDatabase {
-    /// The City or Country database, used for the ISO country code.
+    /// The City or Country database, used for the ISO country code and, with a City edition,
+    /// the city.
     Country,
-    /// The ASN database, used for the autonomous system number.
+    /// The ASN database, used for the autonomous system number and organization name.
     Asn,
     /// The Anonymous IP, Anonymous Plus or IP Risk database, used for the [`Anonymity`].
     Anonymizer,
@@ -68,8 +69,9 @@ pub enum MaxMindError {
     },
 }
 
-/// Country, ASN and anonymizer lookups from `MaxMind` databases (`GeoLite2-City` /
-/// `GeoLite2-Country` / `GeoIP2-*` for the country, `GeoLite2-ASN` for the network, and
+/// Country, city, ASN, network name and anonymizer lookups from `MaxMind` databases
+/// (`GeoLite2-City` / `GeoLite2-Country` / `GeoIP2-*` for the country, and the city with a City
+/// edition; `GeoLite2-ASN` for the autonomous system number and organization name; and
 /// optionally `GeoIP2-Anonymous-IP`, `GeoIP-Anonymous-Plus` or `GeoIP2-IP-Risk` for VPNs,
 /// proxies and Tor, added with [`with_anonymizer`](Self::with_anonymizer)).
 ///
@@ -519,7 +521,13 @@ impl MaxMindIntel {
 const COUNTRY: [PathElement<'static>; 2] = [PathElement::Key("country"), PathElement::Key("iso_code")];
 const REGISTERED_COUNTRY: [PathElement<'static>; 2] =
     [PathElement::Key("registered_country"), PathElement::Key("iso_code")];
+const CITY: [PathElement<'static>; 3] = [
+    PathElement::Key("city"),
+    PathElement::Key("names"),
+    PathElement::Key("en"),
+];
 const ASN: [PathElement<'static>; 1] = [PathElement::Key("autonomous_system_number")];
+const NETWORK: [PathElement<'static>; 1] = [PathElement::Key("autonomous_system_organization")];
 
 /// Below this `anonymizer_confidence`, `is_anonymous_vpn` is ignored.
 const VPN_CONFIDENCE: u16 = 50;
@@ -560,17 +568,20 @@ impl IpIntel for MaxMindIntel {
     fn lookup(&self, ip: IpAddr) -> IpInfo {
         let ip = crate::client::canonical_ip(ip);
         let databases = self.databases.load();
-        let country = databases.country.lookup(ip).ok().and_then(|found| {
+        let geo = databases.country.lookup(ip).ok();
+        let country = geo.as_ref().and_then(|found| {
             [&COUNTRY[..], &REGISTERED_COUNTRY[..]]
                 .into_iter()
                 .find_map(|path| found.decode_path::<&str>(path).ok().flatten())
                 .map(str::to_owned)
         });
-        let asn = databases
-            .asn
+        // Country editions have no `city`, so this is only found in City editions.
+        let city = geo.and_then(|found| found.decode_path::<String>(&CITY).ok().flatten());
+        let system = databases.asn.as_ref().and_then(|reader| reader.lookup(ip).ok());
+        let asn = system
             .as_ref()
-            .and_then(|reader| reader.lookup(ip).ok())
             .and_then(|found| found.decode_path::<u32>(&ASN).ok().flatten());
+        let network = system.and_then(|found| found.decode_path::<String>(&NETWORK).ok().flatten());
         // An address the database does not list is not known to be an anonymizer.
         let anonymity = self.anonymizer.load().as_ref().and_then(|reader| {
             let found = reader.lookup(ip).ok()?.decode::<AnonymizerRecord>().ok()?;
@@ -578,6 +589,8 @@ impl IpIntel for MaxMindIntel {
         });
         IpInfo {
             anonymity,
+            city,
+            network,
             ..IpInfo::new(country, asn)
         }
     }
