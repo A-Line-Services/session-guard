@@ -1,0 +1,46 @@
+name: Semver
+
+# Separate from CI so changing a release label re-runs only this check.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semver:
+    name: semver-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The version is bumped after merge from the PR's release label, so check
+      # against the level that label will release instead of Cargo.toml's version.
+      - name: Release type from label
+        id: release
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          case "$LABELS" in
+            *'"release:major"'*) bump=major ;;
+            *'"release:minor"'*) bump=minor ;;
+            *) bump=patch ;;
+          esac
+          # Before 1.0 a minor bump is the breaking one and a patch bump may add API
+          major=$(sed -n 's/^version = "\([0-9]*\)\..*/\1/p' Cargo.toml | head -n1)
+          if [ "$major" = "0" ]; then
+            case "$bump" in
+              minor) bump=major ;;
+              patch) bump=minor ;;
+            esac
+          fi
+          echo "type=$bump" >> "$GITHUB_OUTPUT"
+
+      - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+        with:
+          release-type: ${{ steps.release.outputs.type }}
