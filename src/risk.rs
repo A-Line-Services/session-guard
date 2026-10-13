@@ -4,7 +4,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::{
     checks::{Check, Checks, Decision, Thresholds},
-    fingerprint::{Baseline, Fingerprint, os_compatible},
+    fingerprint::{Baseline, Fingerprint, anonymity_change, os_compatible},
 };
 
 /// The checks that fired for a request and their summed weight.
@@ -108,6 +108,14 @@ pub fn assess(
         if returned && recent {
             fired.push(Check::IpPingPong);
         }
+
+        // Returning to the previous network is no news: the client was trusted there.
+        if !returned
+            && let (Some(was), Some(now)) = (known.anonymity, current.anonymity)
+            && let Some(check) = anonymity_change(was, now)
+        {
+            fired.push(check);
+        }
     }
 
     let version_changed = matches!((known.browser_major, current.browser_major), (Some(a), Some(b)) if a != b);
@@ -150,6 +158,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::intel::Anonymity;
 
     fn chrome_on_windows() -> Fingerprint {
         Fingerprint {
@@ -163,7 +172,16 @@ mod tests {
             ch_mobile: Some(false),
             accept_language: Some("nl-be,nl,en".to_owned()),
             tls: Some("t13d1516h2_8daaf6152771_02713d6af862".to_owned()),
+            anonymity: Some(Anonymity::Direct),
         }
+    }
+
+    fn via(anonymity: Anonymity) -> Fingerprint {
+        let mut fp = chrome_on_windows();
+        fp.ip_prefix = "198.51.100.0/24".to_owned();
+        fp.asn = Some(9009);
+        fp.anonymity = Some(anonymity);
+        fp
     }
 
     fn assess_now(baseline: &Baseline, current: &Fingerprint) -> Assessment {
@@ -373,6 +391,90 @@ mod tests {
     }
 
     #[test]
+    fn switching_on_a_vpn_steps_up() {
+        for anonymizer in [Anonymity::Vpn, Anonymity::HostingProvider, Anonymity::ResidentialProxy] {
+            assert_eq!(
+                decide(&via(anonymizer)),
+                (Decision::StepUp, vec![Check::AnonymizerEntered, Check::AsnChanged]),
+                "{anonymizer:?}"
+            );
+        }
+        let mut abroad = via(Anonymity::Vpn);
+        abroad.country = Some("NL".to_owned());
+        assert_eq!(
+            decide(&abroad),
+            (Decision::StepUp, vec![Check::CountryChanged, Check::AnonymizerEntered])
+        );
+    }
+
+    #[test]
+    fn tor_steps_up_and_tor_abroad_revokes() {
+        for anonymizer in [Anonymity::TorExitNode, Anonymity::PublicProxy] {
+            assert_eq!(
+                decide(&via(anonymizer)),
+                (Decision::StepUp, vec![Check::TorOrProxyEntered, Check::AsnChanged]),
+                "{anonymizer:?}"
+            );
+        }
+        let mut abroad = via(Anonymity::TorExitNode);
+        abroad.country = Some("DE".to_owned());
+        assert_eq!(
+            decide(&abroad),
+            (Decision::Revoke, vec![Check::TorOrProxyEntered, Check::CountryChanged])
+        );
+    }
+
+    #[test]
+    fn anonymity_only_scores_moves_onto_a_worse_network() {
+        let assess_from = |was: Option<Anonymity>, now: Option<Anonymity>| {
+            let mut known = via(Anonymity::Direct);
+            known.anonymity = was;
+            let mut current = chrome_on_windows();
+            current.anonymity = now;
+            assess_now(&Baseline::new(known), &current).signals
+        };
+        let vpn = Some(Anonymity::Vpn);
+        let tor = Some(Anonymity::TorExitNode);
+        let direct = Some(Anonymity::Direct);
+        assert_eq!(assess_from(vpn, direct), vec![Check::AsnChanged], "leaving a VPN");
+        assert_eq!(
+            assess_from(vpn, Some(Anonymity::HostingProvider)),
+            vec![Check::AsnChanged]
+        );
+        assert_eq!(assess_from(tor, vpn), vec![Check::AsnChanged], "Tor to VPN");
+        assert_eq!(assess_from(tor, Some(Anonymity::PublicProxy)), vec![Check::AsnChanged]);
+        assert_eq!(assess_from(vpn, tor), vec![Check::TorOrProxyEntered, Check::AsnChanged]);
+        assert_eq!(assess_from(None, tor), vec![Check::AsnChanged], "unknown baseline");
+        assert_eq!(assess_from(direct, None), vec![Check::AsnChanged], "lookup failed");
+    }
+
+    #[test]
+    fn anonymity_needs_a_network_move() {
+        let mut current = chrome_on_windows();
+        current.anonymity = Some(Anonymity::Vpn);
+        assert_eq!(decide(&current), (Decision::Allow, vec![]));
+    }
+
+    #[test]
+    fn toggling_a_vpn_back_on_does_not_revoke() {
+        let now = Utc::now();
+        let mut baseline = Baseline::new(chrome_on_windows());
+        baseline.absorb(&via(Anonymity::Vpn), now, &Checks::default());
+        baseline.absorb(&chrome_on_windows(), now + TimeDelta::seconds(10), &Checks::default());
+
+        let a = assess(
+            &baseline,
+            &via(Anonymity::Vpn),
+            now + TimeDelta::seconds(20),
+            TimeDelta::minutes(5),
+            &Checks::default(),
+        );
+        // The client was already trusted on this VPN: only the bounce counts.
+        assert_eq!(a.signals, vec![Check::IpPingPong, Check::AsnChanged]);
+        assert_eq!(a.decision(&Thresholds::default()), Decision::StepUp);
+    }
+
+    #[test]
     fn downgrade_is_flagged() {
         let mut current = chrome_on_windows();
         current.browser_major = Some(120);
@@ -407,7 +509,7 @@ mod tests {
 
     /// Changes legitimate users make routinely, one at a time.
     fn routine_change() -> impl Strategy<Value = (u8, u32)> {
-        (0u8..8, any::<u32>())
+        (0u8..9, any::<u32>())
     }
 
     fn apply_routine(fp: &mut Fingerprint, kind: u8, n: u32) {
@@ -429,6 +531,12 @@ mod tests {
             4 => fp.accept_language = Some(["en", "fr,en", "de-de,de"][(n % 3) as usize].to_owned()),
             5 => fp.tls = Some(format!("tls-{n}")),
             6 => fp.ch_mobile = fp.ch_mobile.map(|m| !m),
+            7 => {
+                fp.ip_prefix = format!("185.{}.0.0/24", n % 256);
+                fp.country = Some(["BE", "NL", "CH", "US"][(n % 4) as usize].to_owned());
+                fp.asn = Some(n);
+                fp.anonymity = Some(Anonymity::Vpn);
+            }
             _ => fp.os = Some("Linux".to_owned()),
         }
     }
@@ -447,7 +555,7 @@ mod tests {
                 fp.ch_platform = Some("Android".into());
                 fp.ch_mobile = Some(true);
             }
-            if !android && kind == 7 {
+            if !android && kind == 8 {
                 // Linux is only a routine change for Android devices.
                 return Ok(());
             }

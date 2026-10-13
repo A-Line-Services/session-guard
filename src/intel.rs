@@ -1,6 +1,8 @@
-//! Country and ASN lookups for client IPs.
+//! Country, ASN and anonymizer lookups for client IPs.
 
 use std::net::IpAddr;
+
+use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "maxmind")]
 #[cfg_attr(docsrs, doc(cfg(feature = "maxmind")))]
@@ -17,13 +19,50 @@ pub struct IpInfo {
     pub country: Option<String>,
     /// Autonomous system number.
     pub asn: Option<u32>,
+    /// Whether the address belongs to a VPN, proxy, hosting provider or Tor. `None` when the
+    /// source does not know.
+    pub anonymity: Option<Anonymity>,
 }
 
 impl IpInfo {
-    /// Builds an `IpInfo`.
+    /// Builds an `IpInfo` without anonymity information.
     pub fn new(country: Option<String>, asn: Option<u32>) -> Self {
-        Self { country, asn }
+        Self {
+            country,
+            asn,
+            anonymity: None,
+        }
     }
+
+    /// Sets what the source knows about the network hiding the client.
+    #[must_use]
+    pub fn with_anonymity(mut self, anonymity: Anonymity) -> Self {
+        self.anonymity = Some(anonymity);
+        self
+    }
+}
+
+/// The kind of network an address belongs to, as far as hiding the client goes.
+///
+/// Moving from [`Direct`](Self::Direct) onto an anonymizer fires
+/// [`Check::AnonymizerEntered`](crate::Check::AnonymizerEntered), moving onto Tor or an open
+/// proxy fires [`Check::TorOrProxyEntered`](crate::Check::TorOrProxyEntered).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Anonymity {
+    /// Looked up and not on a known anonymizer.
+    Direct,
+    /// A commercial VPN.
+    Vpn,
+    /// A hosting or cloud provider, where self-hosted VPNs and scripts run.
+    HostingProvider,
+    /// A residential proxy: traffic relayed through home connections.
+    ResidentialProxy,
+    /// An open proxy anyone can use.
+    PublicProxy,
+    /// A Tor exit node.
+    TorExitNode,
 }
 
 /// A geolocation / ASN source. Without one, IP changes are judged by network prefix only.

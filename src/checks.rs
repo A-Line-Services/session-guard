@@ -23,12 +23,19 @@ pub enum Check {
     UserAgentMissing,
     /// `Sec-CH-UA-Mobile` flipped.
     MobileHintChanged,
+    /// The IP moved onto a Tor exit node or an open proxy (needs an [`IpIntel`](crate::IpIntel)
+    /// source that reports [`Anonymity`](crate::Anonymity)).
+    TorOrProxyEntered,
     /// The IP moved to another country (needs an [`IpIntel`](crate::IpIntel) source).
     CountryChanged,
     /// Client hints the session used to send disappeared.
     ClientHintsMissing,
     /// The TLS fingerprint changed while the browser version stayed the same.
     TlsChanged,
+    /// The IP moved from a direct connection onto a VPN, hosting provider or residential proxy
+    /// (needs an [`IpIntel`](crate::IpIntel) source that reports
+    /// [`Anonymity`](crate::Anonymity)).
+    AnonymizerEntered,
     /// The IP returned to the previous network shortly after leaving it.
     IpPingPong,
     /// The presented token was superseded and its successor never presented: a lost rotation
@@ -44,7 +51,7 @@ pub enum Check {
 
 impl Check {
     /// Every check, in declaration order.
-    pub const ALL: [Check; 15] = [
+    pub const ALL: [Check; 17] = [
         Check::OsChanged,
         Check::BrowserChanged,
         Check::PlatformHintChanged,
@@ -52,9 +59,11 @@ impl Check {
         Check::BrowserDowngraded,
         Check::UserAgentMissing,
         Check::MobileHintChanged,
+        Check::TorOrProxyEntered,
         Check::CountryChanged,
         Check::ClientHintsMissing,
         Check::TlsChanged,
+        Check::AnonymizerEntered,
         Check::IpPingPong,
         Check::OrphanedToken,
         Check::AsnChanged,
@@ -67,9 +76,12 @@ impl Check {
         match self {
             Check::OsChanged | Check::BrowserChanged | Check::PlatformHintChanged => 80,
             Check::InconsistentHints => 60,
-            Check::BrowserDowngraded | Check::UserAgentMissing | Check::MobileHintChanged => 50,
+            Check::BrowserDowngraded
+            | Check::UserAgentMissing
+            | Check::MobileHintChanged
+            | Check::TorOrProxyEntered => 50,
             Check::CountryChanged => 40,
-            Check::ClientHintsMissing | Check::TlsChanged => 30,
+            Check::ClientHintsMissing | Check::TlsChanged | Check::AnonymizerEntered => 30,
             Check::IpPingPong | Check::OrphanedToken => 25,
             Check::AsnChanged => 20,
             Check::AcceptLanguageChanged => 15,
@@ -87,9 +99,11 @@ impl Check {
             Check::BrowserDowngraded => "browser_downgraded",
             Check::UserAgentMissing => "user_agent_missing",
             Check::MobileHintChanged => "mobile_hint_changed",
+            Check::TorOrProxyEntered => "tor_or_proxy_entered",
             Check::CountryChanged => "country_changed",
             Check::ClientHintsMissing => "client_hints_missing",
             Check::TlsChanged => "tls_changed",
+            Check::AnonymizerEntered => "anonymizer_entered",
             Check::IpPingPong => "ip_ping_pong",
             Check::OrphanedToken => "orphaned_token",
             Check::AsnChanged => "asn_changed",
@@ -130,7 +144,7 @@ impl FromStr for Check {
 /// A disabled check is not computed at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Checks {
-    weights: [Option<u32>; 15],
+    weights: [Option<u32>; 17],
 }
 
 impl Default for Checks {
@@ -145,12 +159,13 @@ impl Default for Checks {
 impl Checks {
     /// No checks: only token rotation and reuse detection protect the session.
     pub const fn none() -> Self {
-        Self { weights: [None; 15] }
+        Self { weights: [None; 17] }
     }
 
     /// Default weights with network and environment signals raised, for sensitive routes:
-    /// IP prefix, ASN, language, TLS, ping-pong and an orphaned token weigh 40 (step-up on
-    /// their own) and a country change weighs 80 (revoke).
+    /// IP prefix, ASN, language, TLS, ping-pong, an orphaned token and entering an anonymizer
+    /// weigh 40 (step-up on their own) and a country change or entering Tor or an open proxy
+    /// weighs 80 (revoke).
     pub fn strict() -> Self {
         Self::default()
             .weight(Check::IpPrefixChanged, 40)
@@ -159,7 +174,9 @@ impl Checks {
             .weight(Check::TlsChanged, 40)
             .weight(Check::IpPingPong, 40)
             .weight(Check::OrphanedToken, 40)
+            .weight(Check::AnonymizerEntered, 40)
             .weight(Check::CountryChanged, 80)
+            .weight(Check::TorOrProxyEntered, 80)
     }
 
     /// Turns `check` off.
@@ -265,7 +282,7 @@ mod tests {
     #[test]
     fn default_weights_match_the_spec() {
         let c = Checks::default();
-        let expected = [80, 80, 80, 60, 50, 50, 50, 40, 30, 30, 25, 25, 20, 15, 10];
+        let expected = [80, 80, 80, 60, 50, 50, 50, 50, 40, 30, 30, 30, 25, 25, 20, 15, 10];
         assert_eq!(Check::ALL.len(), expected.len());
         for (check, w) in Check::ALL.into_iter().zip(expected) {
             assert_eq!(c.weight_of(check), Some(w), "{check}");
@@ -282,6 +299,8 @@ mod tests {
             );
         }
         assert_eq!("orphaned_token".parse::<Check>(), Ok(Check::OrphanedToken));
+        assert_eq!("anonymizer_entered".parse::<Check>(), Ok(Check::AnonymizerEntered));
+        assert_eq!("tor_or_proxy_entered".parse::<Check>(), Ok(Check::TorOrProxyEntered));
         assert!("nope".parse::<Check>().is_err());
     }
 
@@ -301,6 +320,8 @@ mod tests {
         assert_eq!(s.weight_of(Check::IpPrefixChanged), Some(40));
         assert_eq!(s.weight_of(Check::OrphanedToken), Some(40));
         assert_eq!(s.weight_of(Check::CountryChanged), Some(80));
+        assert_eq!(s.weight_of(Check::AnonymizerEntered), Some(40));
+        assert_eq!(s.weight_of(Check::TorOrProxyEntered), Some(80));
         assert_eq!(s.weight_of(Check::OsChanged), Some(80));
     }
 

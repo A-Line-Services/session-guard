@@ -4,8 +4,8 @@
 //! A [`Guard`] issues opaque session tokens, stores only their SHA-256 hashes, rotates them
 //! every few minutes and revokes the session when a superseded token comes back after its
 //! successor was used: the signature of a copied cookie. Every request is also scored against
-//! the session's client fingerprint (OS, browser, client hints, country, network); a moderate
-//! change asks the app to re-verify the subject, a drastic one revokes the session.
+//! the session's client fingerprint (OS, browser, client hints, country, network, anonymizers);
+//! a moderate change asks the app to re-verify the subject, a drastic one revokes the session.
 //!
 //! The crate handles sessions only. Logging in, verifying passwords and rate limiting stay in
 //! the app.
@@ -119,7 +119,7 @@ pub use guard::{
     AuthSession, Authenticated, Guard, GuardBuilder, IssuedToken, NewSession, Outcome, PurgeReport, Rejection,
     SessionInfo, StepUpOutcome,
 };
-pub use intel::{IpInfo, IpIntel, NoIpIntel};
+pub use intel::{Anonymity, IpInfo, IpIntel, NoIpIntel};
 #[cfg(feature = "maxmind")]
 #[cfg_attr(docsrs, doc(cfg(feature = "maxmind")))]
 pub use intel::{MaxMindDatabase, MaxMindError, MaxMindIntel};

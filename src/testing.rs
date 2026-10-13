@@ -33,6 +33,7 @@ use crate::{
     checks::Check,
     event::{EventKind, SessionEvent},
     fingerprint::{Baseline, Fingerprint},
+    intel::Anonymity,
     store::{Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
     token::{SessionToken, TokenHash},
 };
@@ -177,6 +178,7 @@ pub async fn records_round_trip<St: SessionStore>(store: St) {
             ch_mobile: Some(false),
             accept_language: Some("nl-be,nl,en".into()),
             tls: Some("t13d1516h2_8daaf6152771_02713d6af862".into()),
+            anonymity: Some(Anonymity::Vpn),
         },
         previous_ip_prefix: Some("198.51.100.0/24".into()),
         ip_changed_at: Some(now - secs(60)),

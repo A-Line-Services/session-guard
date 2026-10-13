@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     checks::{Check, Checks},
     client::ClientContext,
-    intel::IpInfo,
+    intel::{Anonymity, IpInfo},
 };
 
 /// Normalised client signals. Stored server-side only, never sent to the client.
@@ -38,6 +38,8 @@ pub struct Fingerprint {
     pub accept_language: Option<String>,
     /// TLS fingerprint (for example JA4) passed by the proxy.
     pub tls: Option<String>,
+    /// Anonymizer the network belongs to, from the [`IpIntel`](crate::IpIntel) source.
+    pub anonymity: Option<Anonymity>,
 }
 
 impl Fingerprint {
@@ -70,6 +72,7 @@ impl Fingerprint {
             ch_mobile: ctx.ch_mobile,
             accept_language: ctx.accept_language.as_deref().and_then(normalise_languages),
             tls: ctx.tls_fingerprint.clone().filter(|t| !t.is_empty()),
+            anonymity: info.anonymity,
         }
     }
 }
@@ -77,8 +80,8 @@ impl Fingerprint {
 /// What a session is compared against.
 ///
 /// Hard identity (browser family, OS, client hints) is fixed at login or step-up. Soft signals
-/// (network, country, ASN, languages, TLS fingerprint, browser version) follow the client as
-/// trusted requests come in.
+/// (network, country, ASN, anonymity, languages, TLS fingerprint, browser version) follow the
+/// client as trusted requests come in.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 #[non_exhaustive]
@@ -119,6 +122,13 @@ impl Baseline {
         if checks.scores(Check::AsnChanged) {
             keep_known(&mut fp.asn, current.asn.as_ref());
         }
+        if let (Some(was), Some(now)) = (fp.anonymity, current.anonymity)
+            && anonymity_change(was, now).is_some_and(|check| !checks.scores(check))
+        {
+            // Keep the stricter baseline: this route did not score the move.
+        } else {
+            keep_known(&mut fp.anonymity, current.anonymity.as_ref());
+        }
         if checks.scores(Check::AcceptLanguageChanged) {
             keep_known(&mut fp.accept_language, current.accept_language.as_ref());
         }
@@ -135,6 +145,19 @@ impl Baseline {
 fn keep_known<T: Clone>(slot: &mut Option<T>, value: Option<&T>) {
     if let Some(v) = value {
         *slot = Some(v.clone());
+    }
+}
+
+/// The check a move from `was` to `now` fires: onto Tor or an open proxy from anywhere else, or
+/// onto another anonymizer from a direct connection. Leaving or switching between anonymizers
+/// fires nothing.
+pub(crate) fn anonymity_change(was: Anonymity, now: Anonymity) -> Option<Check> {
+    use Anonymity::{Direct, HostingProvider, PublicProxy, ResidentialProxy, TorExitNode, Vpn};
+    match (was, now) {
+        (TorExitNode | PublicProxy, _) => None,
+        (_, TorExitNode | PublicProxy) => Some(Check::TorOrProxyEntered),
+        (Direct, Vpn | HostingProvider | ResidentialProxy) => Some(Check::AnonymizerEntered),
+        _ => None,
     }
 }
 
@@ -233,6 +256,7 @@ fn normalise_languages(header: &str) -> Option<String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::intel::Anonymity;
 
     pub(crate) const CHROME_WIN: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
 
@@ -256,6 +280,11 @@ pub(crate) mod tests {
         assert_eq!(fp.os.as_deref(), Some("Windows"));
         assert_eq!(fp.ch_platform.as_deref(), Some("Windows"));
         assert_eq!(fp.accept_language.as_deref(), Some("nl-be,nl,en-us"));
+        assert_eq!(fp.anonymity, None);
+
+        let info = IpInfo::default().with_anonymity(Anonymity::Vpn);
+        let fp = Fingerprint::capture(&ctx(Some(CHROME_WIN)), info);
+        assert_eq!(fp.anonymity, Some(Anonymity::Vpn));
     }
 
     #[test]
@@ -371,6 +400,43 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn absorb_learns_anonymity_only_when_its_check_scored() {
+        let direct = || {
+            let mut fp = base();
+            fp.anonymity = Some(Anonymity::Direct);
+            fp
+        };
+        let with = |anonymity| {
+            let mut fp = direct();
+            fp.ip_prefix = "198.51.100.0/24".to_owned();
+            fp.anonymity = anonymity;
+            fp
+        };
+        let now = Utc::now();
+
+        let mut baseline = Baseline::new(direct());
+        let loose = Checks::default().disable(Check::AnonymizerEntered);
+        baseline.absorb(&with(Some(Anonymity::Vpn)), now, &loose);
+        assert_eq!(baseline.fingerprint.anonymity, Some(Anonymity::Direct), "unscored move");
+        baseline.absorb(&with(Some(Anonymity::Vpn)), now, &Checks::default());
+        assert_eq!(baseline.fingerprint.anonymity, Some(Anonymity::Vpn));
+
+        // Leaving or switching anonymizers fires nothing, so any route learns it.
+        baseline.absorb(&with(None), now, &Checks::none());
+        assert_eq!(
+            baseline.fingerprint.anonymity,
+            Some(Anonymity::Vpn),
+            "missing never erases"
+        );
+        baseline.absorb(&with(Some(Anonymity::Direct)), now, &Checks::none());
+        assert_eq!(baseline.fingerprint.anonymity, Some(Anonymity::Direct));
+
+        let mut unknown = Baseline::new(base());
+        unknown.absorb(&with(Some(Anonymity::TorExitNode)), now, &Checks::none());
+        assert_eq!(unknown.fingerprint.anonymity, Some(Anonymity::TorExitNode));
+    }
+
+    #[test]
     fn absorb_reports_no_change_for_identical_request() {
         let mut baseline = Baseline::new(base());
         assert!(!baseline.absorb(&base(), Utc::now(), &Checks::default()));
@@ -382,5 +448,11 @@ pub(crate) mod tests {
         let json = serde_json::to_string(&b).unwrap();
         assert_eq!(serde_json::from_str::<Baseline>(&json).unwrap(), b);
         assert_eq!(serde_json::from_str::<Baseline>("{}").unwrap(), Baseline::default());
+
+        let mut fp = base();
+        fp.anonymity = Some(Anonymity::ResidentialProxy);
+        let json = serde_json::to_value(&fp).unwrap();
+        assert_eq!(json["anonymity"], "residential_proxy");
+        assert_eq!(serde_json::from_value::<Fingerprint>(json).unwrap(), fp);
     }
 }
