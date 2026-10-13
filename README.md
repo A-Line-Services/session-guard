@@ -3,6 +3,7 @@
 [![crates.io](https://img.shields.io/crates/v/session-guard.svg)](https://crates.io/crates/session-guard)
 [![docs.rs](https://docs.rs/session-guard/badge.svg)](https://docs.rs/session-guard)
 [![CI](https://github.com/A-Line-Services/session-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/A-Line-Services/session-guard/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/A-Line-Services/session-guard/graph/badge.svg)](https://codecov.io/gh/A-Line-Services/session-guard)
 [![License](https://img.shields.io/crates/l/session-guard.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.94-blue.svg)](#msrv)
 

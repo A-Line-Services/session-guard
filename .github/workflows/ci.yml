@@ -125,6 +125,55 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features --test postgres --test valkey --test e2e
 
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Codecov authenticates the upload via OIDC, so no token secret.
+      id-token: write
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      valkey:
+        image: valkey/valkey:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      VALKEY_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - run: cargo llvm-cov nextest --all-features --lcov --output-path lcov.info
+      - uses: codecov/codecov-action@v7
+        with:
+          files: lcov.info
+          disable_search: true
+          # Fork PRs get no OIDC token and upload tokenless instead.
+          use_oidc: ${{ github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push' }}
+          fail_ci_if_error: ${{ github.event_name == 'push' }}
+
   hack:
     name: feature powerset
     runs-on: ubuntu-latest
