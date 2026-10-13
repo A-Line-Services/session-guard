@@ -243,6 +243,35 @@ async fn superseded_token_works_within_grace_without_rotating() {
     assert_eq!(h.count(EventKind::TokenReuse), 0);
 }
 
+#[test]
+fn only_attack_signals_are_security_relevant() {
+    assert!(!EventKind::TokenReissued.is_security_relevant());
+    for kind in [EventKind::TokenReuse, EventKind::RiskRevoked, EventKind::StepUpRequired] {
+        assert!(kind.is_security_relevant(), "{kind}");
+    }
+}
+
+#[tokio::test]
+async fn reissue_still_reaches_the_hook_and_the_store() {
+    let h = harness();
+    let t0 = login(&h, Uuid::new_v4()).await;
+    h.advance(mins(11));
+    let _lost = authenticated(h.guard.authenticate(&t0, &home()).await.unwrap())
+        .rotated
+        .unwrap();
+    h.advance(mins(1));
+    authenticated(h.guard.authenticate(&t0, &home()).await.unwrap());
+
+    let hooked = h
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == EventKind::TokenReissued)
+        .count();
+    assert_eq!(hooked, 1);
+}
+
 #[tokio::test]
 async fn lost_rotation_response_is_reissued() {
     let h = harness();
