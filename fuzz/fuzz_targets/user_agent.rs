@@ -33,9 +33,9 @@ type Input<'a> = (
 
 fn check_fingerprint(ctx: &ClientContext) {
     let info = IpInfo::default();
-    let fingerprint = Fingerprint::capture(ctx, info.clone());
-    assert_eq!(CACHE.capture(ctx, info.clone()), fingerprint, "cache miss differs");
-    assert_eq!(CACHE.capture(ctx, info), fingerprint, "cache hit differs");
+    let fingerprint = Fingerprint::capture(ctx, &info);
+    assert_eq!(CACHE.capture(ctx, &info), fingerprint, "cache miss differs");
+    assert_eq!(CACHE.capture(ctx, &info), fingerprint, "cache hit differs");
 
     let now = DateTime::UNIX_EPOCH;
     let assessment = assess(

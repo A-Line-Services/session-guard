@@ -8,7 +8,7 @@ use uuid::Uuid;
 use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroizing;
 
-use crate::{risk::Assessment, store::SessionRecord, subject::Subject};
+use crate::{event::SessionOrigin, risk::Assessment, store::SessionRecord, subject::Subject};
 
 /// An authenticated session, as handed to the app.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -207,6 +207,8 @@ pub struct SessionInfo<S> {
     pub os: Option<String>,
     /// Country of the session's client, if an IP intelligence source is configured.
     pub country: Option<String>,
+    /// Where the session started. `None` for sessions created before 0.2.
+    pub origin: Option<SessionOrigin>,
 }
 
 impl<S: Subject> SessionInfo<S> {
@@ -223,6 +225,7 @@ impl<S: Subject> SessionInfo<S> {
             browser: fp.browser.clone(),
             os: fp.os.clone(),
             country: fp.country.clone(),
+            origin: record.origin.clone(),
         })
     }
 }

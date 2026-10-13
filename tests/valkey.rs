@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use chrono::TimeDelta;
-use session_guard::{EventKind, Rotation, SessionStore, SessionUpdate, Supersede, ValkeyStore, testing};
+use session_guard::{ClaimScope, EventKind, Rotation, SessionStore, SessionUpdate, Supersede, ValkeyStore, testing};
 use uuid::Uuid;
 
 mod support;
@@ -75,24 +75,20 @@ async fn claims_dedupe_across_store_instances() {
     let b = store_with_prefix(&prefix).await;
     let now = testing::now_secs();
     let window = TimeDelta::seconds(600);
-    let session = Uuid::new_v4();
+    let scope = ClaimScope::Session(Uuid::new_v4());
+    assert!(a.claim_event(scope, EventKind::RiskRevoked, now, window).await.unwrap());
     assert!(
-        a.claim_event(session, EventKind::RiskRevoked, now, window)
+        !b.claim_event(scope, EventKind::RiskRevoked, now + TimeDelta::seconds(5), window)
             .await
             .unwrap()
     );
     assert!(
-        !b.claim_event(session, EventKind::RiskRevoked, now + TimeDelta::seconds(5), window)
+        b.claim_event(scope, EventKind::RiskRevoked, now + window, window)
             .await
             .unwrap()
     );
     assert!(
-        b.claim_event(session, EventKind::RiskRevoked, now + window, window)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !a.claim_event(session, EventKind::RiskRevoked, now + window, window)
+        !a.claim_event(scope, EventKind::RiskRevoked, now + window, window)
             .await
             .unwrap()
     );
@@ -103,10 +99,10 @@ async fn claims_older_than_cutoff_are_purged() {
     let store = store().await;
     let now = testing::now_secs();
     let window = TimeDelta::seconds(600);
-    let session = Uuid::new_v4();
+    let scope = ClaimScope::Session(Uuid::new_v4());
     assert!(
         store
-            .claim_event(session, EventKind::RiskRevoked, now, window)
+            .claim_event(scope, EventKind::RiskRevoked, now, window)
             .await
             .unwrap()
     );
@@ -116,7 +112,7 @@ async fn claims_older_than_cutoff_are_purged() {
     );
     assert!(
         store
-            .claim_event(session, EventKind::RiskRevoked, now + TimeDelta::seconds(1), window)
+            .claim_event(scope, EventKind::RiskRevoked, now + TimeDelta::seconds(1), window)
             .await
             .unwrap(),
         "the purged claim no longer blocks"
@@ -136,7 +132,7 @@ async fn key_prefixes_isolate_stores() {
     assert!(a.find_by_token(&token).await.unwrap().is_some());
     assert!(b.find_by_token(&token).await.unwrap().is_none());
     assert_eq!(b.list_subject_sessions(&subject).await.unwrap(), vec![]);
-    assert_eq!(b.delete_subject_sessions(&subject).await.unwrap(), 0);
+    assert_eq!(b.delete_subject_sessions(&subject).await.unwrap(), Vec::<Uuid>::new());
     assert!(!b.delete_session(session.id).await.unwrap());
     assert!(!b.apply(&SessionUpdate::touch(session.id, now)).await.unwrap());
     assert_eq!(a.list_subject_sessions(&subject).await.unwrap(), vec![session]);
@@ -149,8 +145,11 @@ async fn subjects_with_lua_metacharacters_are_opaque() {
     let subject = format!("\"x']]..redis.call('FLUSHALL')--{}\"", Uuid::new_v4());
     let session = testing::sample_session_for(&subject, now);
     store.insert_session(&session, &testing::random_hash()).await.unwrap();
-    assert_eq!(store.list_subject_sessions(&subject).await.unwrap(), vec![session]);
-    assert_eq!(store.delete_subject_sessions(&subject).await.unwrap(), 1);
+    assert_eq!(
+        store.list_subject_sessions(&subject).await.unwrap(),
+        vec![session.clone()]
+    );
+    assert_eq!(store.delete_subject_sessions(&subject).await.unwrap(), vec![session.id]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

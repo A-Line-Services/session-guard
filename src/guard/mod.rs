@@ -5,6 +5,7 @@ mod outcome;
 mod tests;
 
 use std::{
+    borrow::Cow,
     collections::HashMap,
     marker::PhantomData,
     net::IpAddr,
@@ -30,10 +31,10 @@ use crate::{
     clock::{Clock, SystemClock},
     config::{GuardConfig, Mode, StepUpPolicy},
     error::GuardError,
-    event::{EventKind, SessionEvent},
+    event::{ClientSummary, EventKind, SessionEvent, SessionOrigin, mask_ip},
     fingerprint::{Baseline, Fingerprint, UaCache},
     intel::{IpIntel, NoIpIntel},
-    store::{Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
+    store::{ClaimScope, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
     subject::Subject,
     token::{SessionToken, TokenHash},
 };
@@ -134,8 +135,18 @@ impl<St: SessionStore, S: Subject> GuardBuilder<St, S> {
         self
     }
 
-    /// Called synchronously for every recorded event, after it is stored. Keep it fast; a panic
-    /// in the hook is caught and logged.
+    /// Called synchronously once per state change, in the process that made the change, after
+    /// the event is stored. When concurrent requests race, only the one whose change took
+    /// effect reports it; the exception is `step_up_required`, which two requests that both
+    /// trip it may each report. Keep it fast; a panic in the hook is caught and logged.
+    ///
+    /// Delivery is at most once. There is no outbox, so a crash between the change and the
+    /// hook loses the event.
+    ///
+    /// With [`alert_dedup_window`](crate::GuardConfigBuilder::alert_dedup_window) set, enforced
+    /// security-relevant events reach the hook at most once per subject and kind per window;
+    /// the rest are still logged and stored. If the store cannot claim the alert, the hook is
+    /// called anyway.
     pub fn on_event(mut self, hook: impl Fn(&SessionEvent) + Send + Sync + 'static) -> Self {
         self.hook = Some(Arc::new(hook));
         self
@@ -222,7 +233,21 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         let encoded = crate::subject::encode(subject)?;
         let token = SessionToken::generate()?;
         let now = self.now();
-        let fingerprint = self.fingerprint(ctx);
+        let info = inner.intel.lookup(ctx.ip);
+        let fingerprint = Fingerprint::capture_cached(ctx, &info, &inner.ua_cache);
+        let client = ClientSummary::observed(info, fingerprint.clone());
+        let keep = inner.config.keep_origin_client;
+        let origin = SessionOrigin {
+            at: now,
+            ip_prefix: mask_ip(ctx.ip),
+            ip: keep.then_some(ctx.ip),
+            user_agent: keep.then(|| self.user_agent(ctx)).flatten(),
+            client: if keep {
+                client.clone()
+            } else {
+                client.clone().minimized()
+            },
+        };
         let record = SessionRecord {
             id: Uuid::new_v4(),
             subject: encoded,
@@ -232,9 +257,10 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             expires_at: now + inner.config.session_lifetime,
             step_up_required: false,
             baseline: Baseline::new(fingerprint),
+            origin: Some(origin),
         };
         inner.store.insert_session(&record, &token.hash()).await?;
-        self.emit(record.id, &record.subject, EventKind::Login, true, ctx, None)
+        self.emit_with(record.id, &record.subject, EventKind::Login, true, ctx, None, client)
             .await;
         Ok(NewSession {
             session_id: record.id,
@@ -343,23 +369,23 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         let step_up = decision == Decision::StepUp;
 
         if decision == Decision::Revoke || (step_up && config.step_up_policy == StepUpPolicy::Revoke) {
-            self.emit(
-                session.id,
-                &session.subject,
-                EventKind::RiskRevoked,
-                !shadow,
-                ctx,
-                Some(&assessment),
-            )
-            .await;
+            self.revoke_for_risk(session, ctx, &assessment, !shadow).await?;
             if !shadow {
-                inner.store.delete_session(session.id).await?;
                 return Ok(Outcome::Rejected(Rejection::Revoked));
             }
         } else if session.step_up_required && !shadow {
             return Ok(Outcome::Rejected(Rejection::StepUpRequired));
         } else if step_up {
             let enforced = config.step_up_policy == StepUpPolicy::Require && !shadow;
+            if enforced {
+                let mut update = SessionUpdate::touch(session.id, now);
+                update.step_up_required = Some(true);
+                update.mark_used =
+                    (state == TokenState::Current && lookup.token.first_used_at.is_none()).then_some(hash);
+                inner.store.apply(&update).await?;
+            }
+            // `apply` does not say whether the flag was already set, so racing requests each
+            // report it.
             self.emit(
                 session.id,
                 &session.subject,
@@ -370,11 +396,6 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             )
             .await;
             if enforced {
-                let mut update = SessionUpdate::touch(session.id, now);
-                update.step_up_required = Some(true);
-                update.mark_used =
-                    (state == TokenState::Current && lookup.token.first_used_at.is_none()).then_some(hash);
-                inner.store.apply(&update).await?;
                 return Ok(Outcome::Rejected(Rejection::StepUpRequired));
             }
         }
@@ -475,24 +496,38 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         update.baseline = Some(Baseline::new(self.fingerprint(ctx)));
         update.step_up_required = Some(false);
         update.authenticated_at = Some(now);
-        update.rotation = Some(Rotation {
+        // With the current token, only one of several concurrent submits replaces it.
+        let supersede = match resolved.state {
+            TokenState::Current => Supersede::Exact(resolved.hash),
+            _ => Supersede::Current,
+        };
+        let rotation = Rotation {
             new_token: token.hash(),
-            supersede: Supersede::Current,
+            supersede,
             prune_superseded_before: now - inner.config.reuse_detection,
-        });
-        if !inner.store.apply(&update).await? {
-            // The session vanished between lookup and update.
-            return Ok(StepUpOutcome::Rejected(Rejection::Revoked));
+        };
+        update.rotation = Some(rotation);
+        if inner.store.apply(&update).await? {
+            self.emit(
+                session.id,
+                &session.subject,
+                EventKind::StepUpCompleted,
+                true,
+                ctx,
+                None,
+            )
+            .await;
+        } else {
+            // A concurrent submit won and reports it; this one still gets a token. Or the
+            // session vanished between lookup and update.
+            update.rotation = Some(Rotation {
+                supersede: Supersede::Current,
+                ..rotation
+            });
+            if !inner.store.apply(&update).await? {
+                return Ok(StepUpOutcome::Rejected(Rejection::Revoked));
+            }
         }
-        self.emit(
-            session.id,
-            &session.subject,
-            EventKind::StepUpCompleted,
-            true,
-            ctx,
-            None,
-        )
-        .await;
         Ok(StepUpOutcome::Completed(self.issue(&token, session.expires_at)))
     }
 
@@ -524,23 +559,41 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         Ok(deleted)
     }
 
-    /// Deletes one session by id, e.g. from a "your devices" page. Returns whether it existed.
-    ///
-    /// # Errors
-    ///
-    /// Store failures only.
-    pub async fn revoke_session(&self, session_id: Uuid) -> Result<bool, GuardError> {
-        Ok(self.inner.store.delete_session(session_id).await?)
-    }
-
-    /// Deletes every session of `subject`, e.g. after a password change. Returns how many.
+    /// Deletes one session of `subject` by id, e.g. from a "your devices" page. Returns whether
+    /// it existed; a session of another subject is left alone. `ctx` is whoever asked; it goes
+    /// into the [`EventKind::Revoked`] event.
     ///
     /// # Errors
     ///
     /// Store failures or a subject that does not serialize.
-    pub async fn revoke_all_for_subject(&self, subject: &S) -> Result<u64, GuardError> {
+    pub async fn revoke_session(&self, subject: &S, session_id: Uuid, ctx: &ClientContext) -> Result<bool, GuardError> {
         let encoded = crate::subject::encode(subject)?;
-        Ok(self.inner.store.delete_subject_sessions(&encoded).await?)
+        let sessions = self.inner.store.list_subject_sessions(&encoded).await?;
+        if !sessions.iter().any(|s| s.id == session_id) {
+            return Ok(false);
+        }
+        let deleted = self.inner.store.delete_session(session_id).await?;
+        if deleted {
+            self.emit(session_id, &encoded, EventKind::Revoked, true, ctx, None)
+                .await;
+        }
+        Ok(deleted)
+    }
+
+    /// Deletes every session of `subject`, e.g. after a password change. Returns how many.
+    /// `ctx` is whoever asked; each session gets an [`EventKind::Revoked`] event.
+    ///
+    /// # Errors
+    ///
+    /// Store failures or a subject that does not serialize.
+    pub async fn revoke_all_for_subject(&self, subject: &S, ctx: &ClientContext) -> Result<u64, GuardError> {
+        let encoded = crate::subject::encode(subject)?;
+        let deleted = self.inner.store.delete_subject_sessions(&encoded).await?;
+        for &session_id in &deleted {
+            self.emit(session_id, &encoded, EventKind::Revoked, true, ctx, None)
+                .await;
+        }
+        Ok(deleted.len() as u64)
     }
 
     /// The live sessions of `subject`.
@@ -674,7 +727,20 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
     }
 
     fn fingerprint(&self, ctx: &ClientContext) -> Fingerprint {
-        Fingerprint::capture_cached(ctx, self.inner.intel.lookup(ctx.ip), &self.inner.ua_cache)
+        Fingerprint::capture_cached(ctx, &self.inner.intel.lookup(ctx.ip), &self.inner.ua_cache)
+    }
+
+    /// The request's User-Agent, truncated to the header cap.
+    fn user_agent(&self, ctx: &ClientContext) -> Option<String> {
+        ctx.user_agent
+            .as_deref()
+            .map(|ua| crate::client::truncate(ua, self.inner.config.max_header_len).to_owned())
+    }
+
+    fn client_summary(&self, ctx: &ClientContext) -> ClientSummary {
+        let info = self.inner.intel.lookup(ctx.ip);
+        let fingerprint = Fingerprint::capture_cached(ctx, &info, &self.inner.ua_cache);
+        ClientSummary::observed(info, fingerprint)
     }
 
     fn presented_hash(&self, presented: &str) -> Option<TokenHash> {
@@ -752,16 +818,42 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         }))
     }
 
-    async fn revoke_for_reuse(&self, session: &SessionRecord, ctx: &ClientContext) -> Result<(), GuardError> {
-        self.inner.store.delete_session(session.id).await?;
-        self.emit(session.id, &session.subject, EventKind::TokenReuse, true, ctx, None)
+    /// Deletes the session when `enforced`. Only the request that deleted it reports the
+    /// revocation; an unenforced one is reported once per dedup window.
+    async fn revoke_for_risk(
+        &self,
+        session: &SessionRecord,
+        ctx: &ClientContext,
+        assessment: &crate::risk::Assessment,
+        enforced: bool,
+    ) -> Result<(), GuardError> {
+        if !enforced || self.inner.store.delete_session(session.id).await? {
+            self.emit(
+                session.id,
+                &session.subject,
+                EventKind::RiskRevoked,
+                enforced,
+                ctx,
+                Some(assessment),
+            )
             .await;
+        }
+        Ok(())
+    }
+
+    /// Deletes the session. Only the request that deleted it reports the reuse.
+    async fn revoke_for_reuse(&self, session: &SessionRecord, ctx: &ClientContext) -> Result<(), GuardError> {
+        if self.inner.store.delete_session(session.id).await? {
+            self.emit(session.id, &session.subject, EventKind::TokenReuse, true, ctx, None)
+                .await;
+        }
         Ok(())
     }
 
     /// Records an event, calls the hook and updates metrics. Never fails: a store error is
     /// logged, a hook panic is caught. Unenforced events are recorded at most once per session
-    /// and kind per dedup window.
+    /// and kind per dedup window. With an alert dedup window, enforced security-relevant events
+    /// reach the hook at most once per subject and kind per window.
     async fn emit(
         &self,
         session_id: Uuid,
@@ -770,6 +862,23 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         enforced: bool,
         ctx: &ClientContext,
         assessment: Option<&crate::risk::Assessment>,
+    ) {
+        let client = self.client_summary(ctx);
+        self.emit_with(session_id, subject, kind, enforced, ctx, assessment, client)
+            .await;
+    }
+
+    /// [`emit`](Self::emit) with the client summary already built.
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_with(
+        &self,
+        session_id: Uuid,
+        subject: &str,
+        kind: EventKind,
+        enforced: bool,
+        ctx: &ClientContext,
+        assessment: Option<&crate::risk::Assessment>,
+        client: ClientSummary,
     ) {
         let inner = &*self.inner;
         let config = &inner.config;
@@ -780,7 +889,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             }
             match inner
                 .store
-                .claim_event(session_id, kind, now, config.shadow_dedup_window)
+                .claim_event(ClaimScope::Session(session_id), kind, now, config.shadow_dedup_window)
                 .await
             {
                 Ok(true) => {}
@@ -791,12 +900,27 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
                 }
             }
         }
-
-        let ip = if config.minimize_event_ip {
-            mask_ip(ctx.ip)
+        let alert = if inner.hook.is_some()
+            && enforced
+            && kind.is_security_relevant()
+            && !config.alert_dedup_window.is_zero()
+        {
+            match inner
+                .store
+                .claim_event(ClaimScope::Subject(subject), kind, now, config.alert_dedup_window)
+                .await
+            {
+                Ok(claimed) => claimed,
+                // Better a duplicate than a lost alert.
+                Err(error) => {
+                    tracing::error!(%session_id, kind = kind.as_str(), %error, "failed to claim subject alert");
+                    true
+                }
+            }
         } else {
-            ctx.ip
+            true
         };
+
         let event = SessionEvent {
             session_id,
             subject: subject.to_owned(),
@@ -804,11 +928,9 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             enforced,
             score: assessment.map(|a| a.score),
             signals: assessment.map(|a| a.signals.clone()).unwrap_or_default(),
-            ip,
-            user_agent: ctx
-                .user_agent
-                .as_deref()
-                .map(|ua| crate::client::truncate(ua, config.max_header_len).to_owned()),
+            ip: ctx.ip,
+            user_agent: self.user_agent(ctx),
+            client,
             at: now,
         };
         if kind.is_security_relevant() {
@@ -816,10 +938,21 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         } else {
             tracing::debug!(%session_id, kind = kind.as_str(), "session event");
         }
-        if let Err(error) = inner.store.record_event(&event).await {
+        let stored = if config.minimize_stored_events {
+            Cow::Owned(SessionEvent {
+                ip: mask_ip(event.ip),
+                user_agent: None,
+                client: event.client.clone().minimized(),
+                ..event.clone()
+            })
+        } else {
+            Cow::Borrowed(&event)
+        };
+        if let Err(error) = inner.store.record_event(&stored).await {
             tracing::error!(%session_id, kind = kind.as_str(), %error, "failed to record session event");
         }
-        if let Some(hook) = &inner.hook
+        if alert
+            && let Some(hook) = &inner.hook
             && catch_unwind(AssertUnwindSafe(|| hook(&event))).is_err()
         {
             tracing::error!(%session_id, kind = kind.as_str(), "on_event hook panicked");
@@ -849,12 +982,6 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             }
         }
     }
-}
-
-/// Reduces an address to its network prefix (/24 or /48) for event storage.
-fn mask_ip(ip: IpAddr) -> IpAddr {
-    let len = if ip.is_ipv4() { 24 } else { 48 };
-    ipnet::IpNet::new(ip, len).map_or(ip, |net| net.trunc().addr())
 }
 
 fn td(duration: Duration) -> TimeDelta {

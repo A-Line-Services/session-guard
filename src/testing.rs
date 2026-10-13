@@ -31,9 +31,10 @@ use uuid::Uuid;
 
 use crate::{
     checks::Check,
-    event::{EventKind, SessionEvent},
+    event::{ClientSummary, EventKind, SessionEvent, SessionOrigin},
     fingerprint::{Baseline, Fingerprint},
-    store::{Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
+    intel::Anonymity,
+    store::{ClaimScope, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
     token::{SessionToken, TokenHash},
 };
 
@@ -46,6 +47,7 @@ macro_rules! store_conformance {
             insert_and_find,
             unknown_token_is_none,
             records_round_trip,
+            session_without_origin,
             exact_rotation_happens_once,
             concurrent_rotation_has_one_winner,
             rotation_if_issued_before,
@@ -61,6 +63,7 @@ macro_rules! store_conformance {
             delete_expired_absolute_and_idle,
             events_record_and_purge,
             event_claims_dedupe_within_window,
+            subject_claims_dedupe_within_window,
             apply_to_missing_session,
         );
     };
@@ -107,6 +110,17 @@ pub fn sample_session_for(subject: &str, now: DateTime<Utc>) -> SessionRecord {
         baseline: Baseline::new(Fingerprint {
             ip_prefix: "203.0.113.0/24".into(),
             ..Fingerprint::default()
+        }),
+        origin: Some(SessionOrigin {
+            at: now,
+            ip_prefix: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 0)),
+            ip: None,
+            user_agent: None,
+            client: ClientSummary {
+                country: Some("BE".into()),
+                browser: Some("Firefox".into()),
+                ..ClientSummary::default()
+            },
         }),
     }
 }
@@ -177,14 +191,54 @@ pub async fn records_round_trip<St: SessionStore>(store: St) {
             ch_mobile: Some(false),
             accept_language: Some("nl-be,nl,en".into()),
             tls: Some("t13d1516h2_8daaf6152771_02713d6af862".into()),
+            anonymity: Some(Anonymity::Vpn),
         },
         previous_ip_prefix: Some("198.51.100.0/24".into()),
         ip_changed_at: Some(now - secs(60)),
+    };
+    session.origin = Some(SessionOrigin {
+        at: now - secs(30),
+        ip_prefix: "2001:db8:1::".parse().unwrap(),
+        ip: Some("2001:db8:1::7".parse().unwrap()),
+        user_agent: Some("Mozilla/5.0 🦀".into()),
+        client: ClientSummary {
+            country: Some("BE".into()),
+            city: Some("Zürich".into()),
+            asn: Some(64_496),
+            network: Some("Example Net".into()),
+            anonymity: Some(Anonymity::Vpn),
+            browser: Some("Firefox".into()),
+            os: Some("Linux".into()),
+        },
+    });
+    let token = random_hash();
+    store.insert_session(&session, &token).await.unwrap();
+    let found = store.find_by_token(&token).await.unwrap().unwrap();
+    assert_eq!(found.session, session);
+    assert_eq!(
+        store.list_subject_sessions(&session.subject).await.unwrap(),
+        vec![session]
+    );
+}
+
+/// A session without an origin (created before 0.2) is stored and read back as such.
+pub async fn session_without_origin<St: SessionStore>(store: St) {
+    let now = now_secs();
+    let session = SessionRecord {
+        origin: None,
+        ..sample_session(now)
     };
     let token = random_hash();
     store.insert_session(&session, &token).await.unwrap();
     let found = store.find_by_token(&token).await.unwrap().unwrap();
     assert_eq!(found.session, session);
+    store
+        .apply(&SessionUpdate::touch(session.id, now + secs(1)))
+        .await
+        .unwrap();
+    let listed = store.list_subject_sessions(&session.subject).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].origin, None);
 }
 
 /// `Supersede::Exact` rotates only while that token is current.
@@ -427,6 +481,7 @@ pub async fn none_fields_are_preserved<St: SessionStore>(store: St) {
     assert_eq!(found.created_at, session.created_at);
     assert_eq!(found.expires_at, session.expires_at);
     assert_eq!(found.subject, session.subject);
+    assert_eq!(found.origin, session.origin);
 
     store
         .apply(&SessionUpdate {
@@ -512,24 +567,30 @@ pub async fn delete_session_removes_tokens<St: SessionStore>(store: St) {
     assert!(store.find_by_token(&t2).await.unwrap().is_none());
 }
 
-/// Deleting a subject's sessions leaves other subjects alone.
+/// Deleting a subject's sessions returns their ids and leaves other subjects alone.
 pub async fn delete_subject_sessions<St: SessionStore>(store: St) {
     let now = now_secs();
     let subject = format!("\"conformance-{}\"", Uuid::new_v4());
     let mut tokens = Vec::new();
+    let mut ids = Vec::new();
     for _ in 0..3 {
         let token = random_hash();
-        store
-            .insert_session(&sample_session_for(&subject, now), &token)
-            .await
-            .unwrap();
+        let session = sample_session_for(&subject, now);
+        store.insert_session(&session, &token).await.unwrap();
         tokens.push(token);
+        ids.push(session.id);
     }
     let other = random_hash();
     store.insert_session(&sample_session(now), &other).await.unwrap();
 
-    assert_eq!(store.delete_subject_sessions(&subject).await.unwrap(), 3);
-    assert_eq!(store.delete_subject_sessions(&subject).await.unwrap(), 0);
+    let mut deleted = store.delete_subject_sessions(&subject).await.unwrap();
+    deleted.sort();
+    ids.sort();
+    assert_eq!(deleted, ids);
+    assert_eq!(
+        store.delete_subject_sessions(&subject).await.unwrap(),
+        Vec::<Uuid>::new()
+    );
     for token in &tokens {
         assert!(store.find_by_token(token).await.unwrap().is_none());
     }
@@ -597,6 +658,12 @@ pub async fn events_record_and_purge<St: SessionStore>(store: St) {
         signals: vec![Check::OsChanged, Check::CountryChanged],
         ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 0)),
         user_agent: Some("Mozilla/5.0 🦀".into()),
+        client: ClientSummary {
+            country: Some("BE".into()),
+            asn: Some(64500),
+            browser: Some("Firefox".into()),
+            ..ClientSummary::default()
+        },
         at,
     };
     store.record_event(&event).await.unwrap();
@@ -605,6 +672,7 @@ pub async fn events_record_and_purge<St: SessionStore>(store: St) {
             user_agent: None,
             score: None,
             signals: vec![],
+            client: ClientSummary::default(),
             ..event.clone()
         })
         .await
@@ -618,7 +686,7 @@ pub async fn event_claims_dedupe_within_window<St: SessionStore>(store: St) {
     let now = now_secs();
     let window = secs(600);
     let session = Uuid::new_v4();
-    let claim = |kind, at| store.claim_event(session, kind, at, window);
+    let claim = |kind, at| store.claim_event(ClaimScope::Session(session), kind, at, window);
     assert!(claim(EventKind::RiskRevoked, now).await.unwrap());
     assert!(!claim(EventKind::RiskRevoked, now + secs(1)).await.unwrap());
     assert!(!claim(EventKind::RiskRevoked, now + secs(599)).await.unwrap());
@@ -628,7 +696,7 @@ pub async fn event_claims_dedupe_within_window<St: SessionStore>(store: St) {
     );
     assert!(
         store
-            .claim_event(Uuid::new_v4(), EventKind::RiskRevoked, now, window)
+            .claim_event(ClaimScope::Session(Uuid::new_v4()), EventKind::RiskRevoked, now, window)
             .await
             .unwrap(),
         "sessions are independent"
@@ -641,6 +709,50 @@ pub async fn event_claims_dedupe_within_window<St: SessionStore>(store: St) {
         !claim(EventKind::RiskRevoked, now + secs(601)).await.unwrap(),
         "the new claim holds"
     );
+}
+
+/// A claim succeeds once per subject and kind per window, independent of session claims, and
+/// purging events removes old subject claims.
+pub async fn subject_claims_dedupe_within_window<St: SessionStore>(store: St) {
+    let now = now_secs();
+    let window = secs(600);
+    let subject = format!("\"conformance-{}\"", Uuid::new_v4());
+    let claim = |kind, at| store.claim_event(ClaimScope::Subject(&subject), kind, at, window);
+    assert!(claim(EventKind::RiskRevoked, now).await.unwrap());
+    assert!(!claim(EventKind::RiskRevoked, now + secs(1)).await.unwrap());
+    assert!(!claim(EventKind::RiskRevoked, now + secs(599)).await.unwrap());
+    assert!(
+        claim(EventKind::TokenReuse, now).await.unwrap(),
+        "kinds are independent"
+    );
+    let other = format!("\"conformance-{}\"", Uuid::new_v4());
+    assert!(
+        store
+            .claim_event(ClaimScope::Subject(&other), EventKind::RiskRevoked, now, window)
+            .await
+            .unwrap(),
+        "subjects are independent"
+    );
+    let session = Uuid::new_v4();
+    let session_claim = |at| store.claim_event(ClaimScope::Session(session), EventKind::RiskRevoked, at, window);
+    assert!(session_claim(now).await.unwrap(), "session claims are independent");
+    assert!(!session_claim(now + secs(1)).await.unwrap());
+    assert!(
+        claim(EventKind::RiskRevoked, now + secs(600)).await.unwrap(),
+        "the window elapsed"
+    );
+    assert!(
+        !claim(EventKind::RiskRevoked, now + secs(601)).await.unwrap(),
+        "the new claim holds"
+    );
+
+    let at = far_past();
+    let old = format!("\"conformance-{}\"", Uuid::new_v4());
+    let claim_old = |at| store.claim_event(ClaimScope::Subject(&old), EventKind::RiskRevoked, at, window);
+    assert!(claim_old(at).await.unwrap());
+    assert!(!claim_old(at + secs(2)).await.unwrap());
+    store.delete_events_before(at + secs(1)).await.unwrap();
+    assert!(claim_old(at + secs(2)).await.unwrap(), "the purge removed the claim");
 }
 
 /// Updating a session that does not exist is not an error.

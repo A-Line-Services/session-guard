@@ -11,10 +11,10 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-use super::{SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
+use super::{ClaimScope, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
 use crate::{
     error::StoreError,
-    event::{EventKind, SessionEvent},
+    event::{EventKind, SessionEvent, SessionOrigin},
     fingerprint::Baseline,
     token::TokenHash,
 };
@@ -202,6 +202,7 @@ fn decode_hash(bytes: &[u8]) -> Result<TokenHash, sqlx::Error> {
 
 fn session_from_row(row: &PgRow) -> Result<SessionRecord, sqlx::Error> {
     let Json(baseline): Json<Baseline> = row.try_get("baseline")?;
+    let origin: Option<Json<SessionOrigin>> = row.try_get("origin")?;
     Ok(SessionRecord {
         id: row.try_get("id")?,
         subject: row.try_get("subject")?,
@@ -211,6 +212,7 @@ fn session_from_row(row: &PgRow) -> Result<SessionRecord, sqlx::Error> {
         expires_at: row.try_get("expires_at")?,
         step_up_required: row.try_get("step_up_required")?,
         baseline,
+        origin: origin.map(|Json(origin)| origin),
     })
 }
 
@@ -233,8 +235,9 @@ impl SessionStore for PgStore {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO session_guard_sessions
-                 (id, subject, created_at, authenticated_at, last_seen_at, expires_at, step_up_required, baseline)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 (id, subject, created_at, authenticated_at, last_seen_at, expires_at, step_up_required, baseline,
+                  origin)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(session.id)
         .bind(&session.subject)
@@ -244,6 +247,7 @@ impl SessionStore for PgStore {
         .bind(session.expires_at)
         .bind(session.step_up_required)
         .bind(Json(&session.baseline))
+        .bind(session.origin.as_ref().map(Json))
         .execute(&mut *tx)
         .await?;
         sqlx::query("INSERT INTO session_guard_tokens (hash, session_id, issued_at) VALUES ($1, $2, $3)")
@@ -259,7 +263,7 @@ impl SessionStore for PgStore {
     async fn find_by_token(&self, token: &TokenHash) -> Result<Option<TokenLookup>, StoreError> {
         let row = sqlx::query(
             "SELECT s.id, s.subject, s.created_at, s.authenticated_at, s.last_seen_at, s.expires_at,
-                    s.step_up_required, s.baseline,
+                    s.step_up_required, s.baseline, s.origin,
                     t.hash, t.issued_at, t.first_used_at, t.superseded_at,
                     EXISTS (
                         SELECT 1 FROM session_guard_tokens n
@@ -300,18 +304,18 @@ impl SessionStore for PgStore {
         Ok(done.rows_affected() > 0)
     }
 
-    async fn delete_subject_sessions(&self, subject: &str) -> Result<u64, StoreError> {
-        let done = sqlx::query("DELETE FROM session_guard_sessions WHERE subject = $1")
+    async fn delete_subject_sessions(&self, subject: &str) -> Result<Vec<Uuid>, StoreError> {
+        let ids = sqlx::query_scalar("DELETE FROM session_guard_sessions WHERE subject = $1 RETURNING id")
             .bind(subject)
-            .execute(&self.pool)
+            .fetch_all(&self.pool)
             .await?;
-        Ok(done.rows_affected())
+        Ok(ids)
     }
 
     async fn list_subject_sessions(&self, subject: &str) -> Result<Vec<SessionRecord>, StoreError> {
         let rows = sqlx::query(
             "SELECT s.id, s.subject, s.created_at, s.authenticated_at, s.last_seen_at, s.expires_at,
-                    s.step_up_required, s.baseline
+                    s.step_up_required, s.baseline, s.origin
              FROM session_guard_sessions s
              WHERE s.subject = $1",
         )
@@ -334,8 +338,8 @@ impl SessionStore for PgStore {
         let signals: Vec<&str> = event.signals.iter().map(|c| c.as_str()).collect();
         sqlx::query(
             "INSERT INTO session_guard_events
-                 (session_id, subject, kind, enforced, score, signals, ip, user_agent, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                 (session_id, subject, kind, enforced, score, signals, ip, user_agent, client, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(event.session_id)
         .bind(&event.subject)
@@ -345,6 +349,7 @@ impl SessionStore for PgStore {
         .bind(signals)
         .bind(event.ip)
         .bind(event.user_agent.as_deref())
+        .bind(sqlx::types::Json(&event.client))
         .bind(event.at)
         .execute(&self.pool)
         .await?;
@@ -353,7 +358,8 @@ impl SessionStore for PgStore {
 
     async fn delete_events_before(&self, cutoff: DateTime<Utc>) -> Result<u64, StoreError> {
         let done = sqlx::query(
-            "WITH claims AS (DELETE FROM session_guard_event_claims WHERE claimed_at < $1)
+            "WITH claims AS (DELETE FROM session_guard_event_claims WHERE claimed_at < $1),
+                  subject_claims AS (DELETE FROM session_guard_subject_claims WHERE claimed_at < $1)
              DELETE FROM session_guard_events WHERE created_at < $1",
         )
         .bind(cutoff)
@@ -364,7 +370,7 @@ impl SessionStore for PgStore {
 
     async fn claim_event(
         &self,
-        session_id: Uuid,
+        scope: ClaimScope<'_>,
         kind: EventKind,
         now: DateTime<Utc>,
         window: TimeDelta,
@@ -372,18 +378,28 @@ impl SessionStore for PgStore {
         // A claim at or before `now - window` has lapsed. If that instant does not exist, no
         // stored claim can have lapsed; NULL never compares true.
         let lapsed_at = now.checked_sub_signed(window);
-        let claimed = sqlx::query(
-            "INSERT INTO session_guard_event_claims (session_id, kind, claimed_at) VALUES ($1, $2, $3)
-             ON CONFLICT (session_id, kind) DO UPDATE SET claimed_at = EXCLUDED.claimed_at
-             WHERE session_guard_event_claims.claimed_at <= $4
-             RETURNING 1",
-        )
-        .bind(session_id)
-        .bind(kind.as_str())
-        .bind(now)
-        .bind(lapsed_at)
-        .fetch_optional(&self.pool)
-        .await?;
+        let query = match scope {
+            ClaimScope::Session(session_id) => sqlx::query(
+                "INSERT INTO session_guard_event_claims (session_id, kind, claimed_at) VALUES ($1, $2, $3)
+                 ON CONFLICT (session_id, kind) DO UPDATE SET claimed_at = EXCLUDED.claimed_at
+                 WHERE session_guard_event_claims.claimed_at <= $4
+                 RETURNING 1",
+            )
+            .bind(session_id),
+            ClaimScope::Subject(subject) => sqlx::query(
+                "INSERT INTO session_guard_subject_claims (subject, kind, claimed_at) VALUES ($1, $2, $3)
+                 ON CONFLICT (subject, kind) DO UPDATE SET claimed_at = EXCLUDED.claimed_at
+                 WHERE session_guard_subject_claims.claimed_at <= $4
+                 RETURNING 1",
+            )
+            .bind(subject),
+        };
+        let claimed = query
+            .bind(kind.as_str())
+            .bind(now)
+            .bind(lapsed_at)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(claimed.is_some())
     }
 }

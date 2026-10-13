@@ -73,6 +73,8 @@ fn intel(ip: IpAddr) -> IpInfo {
         _ => ("US", 64500),
     };
     IpInfo::new(Some(country.into()), Some(asn))
+        .with_city("Springfield")
+        .with_network("Example Net")
 }
 
 struct Harness<S = Uuid> {
@@ -697,6 +699,131 @@ async fn shadow_dedup_spans_guards_sharing_a_store() {
     assert_eq!(risk, 1);
 }
 
+// --- alert dedup ---
+
+fn alert_dedup(window: Duration) -> Harness {
+    harness_with(GuardConfig::builder().alert_dedup_window(window).build().unwrap())
+}
+
+/// Revokes a fresh session of `user` from the attacker's device.
+async fn revoke(h: &Harness, user: Uuid) {
+    let token = login(h, user).await;
+    assert_eq!(
+        rejected(h.guard.authenticate(&token, &attacker()).await.unwrap()),
+        Rejection::Revoked
+    );
+}
+
+fn stored(h: &Harness, kind: EventKind) -> usize {
+    h.store.events().iter().filter(|e| e.kind == kind).count()
+}
+
+#[tokio::test]
+async fn alerts_are_deduplicated_per_subject_but_still_recorded() {
+    let h = alert_dedup(mins(15));
+    let user = Uuid::new_v4();
+    revoke(&h, user).await;
+    revoke(&h, user).await;
+    assert_eq!(stored(&h, EventKind::RiskRevoked), 2);
+    assert_eq!(h.count(EventKind::RiskRevoked), 1);
+    assert_eq!(h.count(EventKind::Login), 2, "logins are never deduplicated");
+
+    revoke(&h, Uuid::new_v4()).await;
+    assert_eq!(h.count(EventKind::RiskRevoked), 2, "subjects are independent");
+
+    h.advance(mins(15));
+    revoke(&h, user).await;
+    assert_eq!(h.count(EventKind::RiskRevoked), 3, "the window elapsed");
+}
+
+#[tokio::test]
+async fn zero_alert_dedup_window_calls_the_hook_every_time() {
+    let h = alert_dedup(Duration::ZERO);
+    let user = Uuid::new_v4();
+    revoke(&h, user).await;
+    revoke(&h, user).await;
+    assert_eq!(h.count(EventKind::RiskRevoked), 2);
+}
+
+/// A [`MemoryStore`] whose claims always fail.
+#[derive(Default)]
+struct FailingClaims(MemoryStore);
+
+impl SessionStore for FailingClaims {
+    async fn insert_session(&self, session: &SessionRecord, token: &TokenHash) -> Result<(), crate::StoreError> {
+        self.0.insert_session(session, token).await
+    }
+
+    async fn find_by_token(&self, token: &TokenHash) -> Result<Option<crate::store::TokenLookup>, crate::StoreError> {
+        self.0.find_by_token(token).await
+    }
+
+    async fn apply(&self, update: &SessionUpdate) -> Result<bool, crate::StoreError> {
+        self.0.apply(update).await
+    }
+
+    async fn delete_session(&self, session_id: Uuid) -> Result<bool, crate::StoreError> {
+        self.0.delete_session(session_id).await
+    }
+
+    async fn delete_subject_sessions(&self, subject: &str) -> Result<Vec<Uuid>, crate::StoreError> {
+        self.0.delete_subject_sessions(subject).await
+    }
+
+    async fn list_subject_sessions(&self, subject: &str) -> Result<Vec<SessionRecord>, crate::StoreError> {
+        self.0.list_subject_sessions(subject).await
+    }
+
+    async fn delete_expired(&self, now: DateTime<Utc>, idle_cutoff: DateTime<Utc>) -> Result<u64, crate::StoreError> {
+        self.0.delete_expired(now, idle_cutoff).await
+    }
+
+    async fn record_event(&self, event: &SessionEvent) -> Result<(), crate::StoreError> {
+        self.0.record_event(event).await
+    }
+
+    async fn delete_events_before(&self, cutoff: DateTime<Utc>) -> Result<u64, crate::StoreError> {
+        self.0.delete_events_before(cutoff).await
+    }
+
+    fn claim_event(
+        &self,
+        _scope: ClaimScope<'_>,
+        _kind: EventKind,
+        _now: DateTime<Utc>,
+        _window: chrono::TimeDelta,
+    ) -> impl Future<Output = Result<bool, crate::StoreError>> + Send {
+        std::future::ready(Err("claims unavailable".into()))
+    }
+}
+
+#[tokio::test]
+async fn failed_alert_claim_still_calls_the_hook() {
+    let store = Arc::new(FailingClaims::default());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let config = GuardConfig::builder().alert_dedup_window(mins(15)).build().unwrap();
+    let guard = Guard::builder(Arc::clone(&store), config)
+        .ip_intel(intel)
+        .on_event(move |e: &SessionEvent| sink.lock().unwrap().push(e.clone()))
+        .build();
+    let user = Uuid::new_v4();
+    for _ in 0..2 {
+        let token = guard.login(&user, &home(), None).await.unwrap().token;
+        assert_eq!(
+            rejected(guard.authenticate(token.expose(), &attacker()).await.unwrap()),
+            Rejection::Revoked
+        );
+    }
+    let hooked = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == EventKind::RiskRevoked)
+        .count();
+    assert_eq!(hooked, 2);
+}
+
 #[tokio::test]
 async fn shadow_mode_still_enforces_reuse() {
     let h = harness_with(GuardConfig::builder().mode(Mode::Shadow).build().unwrap());
@@ -791,16 +918,43 @@ async fn logout_and_bulk_revocation() {
     let _c = login(&h, user).await;
     let other = login(&h, Uuid::new_v4()).await;
     assert_eq!(h.guard.list_sessions(&user).await.unwrap().len(), 2);
-    assert_eq!(h.guard.revoke_all_for_subject(&user).await.unwrap(), 2);
+    assert_eq!(h.guard.revoke_all_for_subject(&user, &home()).await.unwrap(), 2);
     assert_eq!(
         rejected(h.guard.authenticate(&b, &home()).await.unwrap()),
         Rejection::NotAuthenticated
     );
     authenticated(h.guard.authenticate(&other, &home()).await.unwrap());
 
-    let id = h.guard.peek(&other).await.unwrap().unwrap().session_id;
-    assert!(h.guard.revoke_session(id).await.unwrap());
+    let owner = h.guard.peek(&other).await.unwrap().unwrap();
+    let id = owner.session_id;
+    assert!(!h.guard.revoke_session(&user, id, &home()).await.unwrap());
+    assert!(h.guard.peek(&other).await.unwrap().is_some());
+    assert!(h.guard.revoke_session(&owner.subject, id, &home()).await.unwrap());
     assert!(h.guard.peek(&other).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn revocation_reports_each_session_once() {
+    let h = harness();
+    let user = Uuid::new_v4();
+    let a = login(&h, user).await;
+    login(&h, user).await;
+    login(&h, Uuid::new_v4()).await;
+    let a_id = h.guard.peek(&a).await.unwrap().unwrap().session_id;
+
+    assert!(h.guard.revoke_session(&user, a_id, &abroad()).await.unwrap());
+    assert!(!h.guard.revoke_session(&user, a_id, &abroad()).await.unwrap());
+    assert_eq!(h.guard.revoke_all_for_subject(&user, &home()).await.unwrap(), 1);
+    assert_eq!(h.guard.revoke_all_for_subject(&user, &home()).await.unwrap(), 0);
+
+    let events = h.events.lock().unwrap().clone();
+    let revoked: Vec<_> = events.iter().filter(|e| e.kind == EventKind::Revoked).collect();
+    assert_eq!(revoked.len(), 2);
+    assert_eq!(revoked[0].session_id, a_id);
+    assert_eq!(revoked[0].ip, abroad().ip);
+    assert_ne!(revoked[1].session_id, a_id);
+    assert!(revoked.iter().all(|e| e.enforced && e.subject::<Uuid>() == Some(user)));
+    assert!(!EventKind::Revoked.is_security_relevant());
 }
 
 #[tokio::test]
@@ -820,6 +974,42 @@ async fn list_sessions_describes_devices_and_skips_expired() {
     assert_eq!(list[0].browser.as_deref(), Some("Chrome"));
     assert_eq!(list[0].os.as_deref(), Some("Windows"));
     assert_eq!(list[0].country.as_deref(), Some("US"));
+    let origin = list[0].origin.as_ref().expect("login records the origin");
+    assert_eq!(origin.at, start() + chrono::TimeDelta::minutes(61));
+    assert_eq!(origin.ip_prefix, ip("203.0.113.0"));
+}
+
+#[tokio::test]
+async fn login_records_a_minimised_origin_by_default() {
+    let h = harness();
+    let user = Uuid::new_v4();
+    login(&h, user).await;
+    h.advance(mins(5));
+    let origin = h.guard.list_sessions(&user).await.unwrap()[0].origin.clone().unwrap();
+    assert_eq!(origin.at, start());
+    assert_eq!(origin.ip_prefix, ip("203.0.113.0"));
+    assert_eq!(origin.ip, None);
+    assert_eq!(origin.user_agent, None);
+    assert_eq!(origin.client.city, None, "the city would undo the masking");
+    assert_eq!(origin.client.country.as_deref(), Some("US"));
+    assert_eq!(origin.client.network.as_deref(), Some("Example Net"));
+    assert_eq!(origin.client.browser.as_deref(), Some("Chrome"));
+}
+
+#[tokio::test]
+async fn keep_origin_client_keeps_the_full_origin() {
+    let h = harness_with(GuardConfig::builder().keep_origin_client(true).build().unwrap());
+    let user = Uuid::new_v4();
+    let t0 = login(&h, user).await;
+    let origin = h.guard.peek(&t0).await.unwrap().unwrap().origin.unwrap();
+    assert_eq!(origin.ip_prefix, ip("203.0.113.0"));
+    assert_eq!(origin.ip, Some(ip("203.0.113.7")));
+    assert_eq!(origin.user_agent.as_deref(), Some(CHROME_WIN));
+    assert_eq!(origin.client.city.as_deref(), Some("Springfield"));
+    assert_eq!(
+        h.guard.list_sessions(&user).await.unwrap()[0].origin.as_ref(),
+        Some(&origin)
+    );
 }
 
 #[tokio::test]
@@ -918,10 +1108,50 @@ async fn peek_is_read_only() {
 }
 
 #[tokio::test]
-async fn minimised_event_ip() {
-    let h = harness_with(GuardConfig::builder().minimize_event_ip(true).build().unwrap());
+async fn stored_events_are_minimised_by_default() {
+    let h = harness();
     login(&h, Uuid::new_v4()).await;
-    assert_eq!(h.events.lock().unwrap()[0].ip, ip("203.0.113.0"));
+    let hooked = h.events.lock().unwrap()[0].clone();
+    assert_eq!(hooked.ip, ip("203.0.113.7"), "the hook sees the full address");
+    assert_eq!(hooked.user_agent.as_deref(), Some(CHROME_WIN));
+    assert_eq!(hooked.client.city.as_deref(), Some("Springfield"));
+    let stored = &h.store.events()[0];
+    assert_eq!(stored.ip, ip("203.0.113.0"));
+    assert_eq!(stored.user_agent, None, "the families in `client` are enough");
+    assert_eq!(stored.client.city, None, "the city would undo the masking");
+    assert_eq!(stored.client.country.as_deref(), Some("US"));
+    assert_eq!(stored.client.browser.as_deref(), Some("Chrome"));
+}
+
+#[tokio::test]
+async fn events_describe_the_client() {
+    let h = harness_with(GuardConfig::builder().minimize_stored_events(false).build().unwrap());
+    login(&h, Uuid::new_v4()).await;
+    let event = h.events.lock().unwrap()[0].clone();
+    let client = &event.client;
+    assert_eq!(client.country.as_deref(), Some("US"));
+    assert_eq!(client.city.as_deref(), Some("Springfield"));
+    assert_eq!(client.asn, Some(64500));
+    assert_eq!(client.network.as_deref(), Some("Example Net"));
+    assert_eq!(client.anonymity, None);
+    assert_eq!(client.browser.as_deref(), Some("Chrome"));
+    assert_eq!(client.os.as_deref(), Some("Windows"));
+    assert_eq!(h.store.events()[0], event, "stored as is when minimisation is off");
+}
+
+#[tokio::test]
+async fn reuse_event_describes_the_presenting_client() {
+    let h = harness();
+    let t0 = login(&h, Uuid::new_v4()).await;
+    h.advance(mins(11));
+    authenticated(h.guard.authenticate(&t0, &home()).await.unwrap());
+    h.advance(mins(1));
+    authenticated(h.guard.authenticate(&t0, &home()).await.unwrap());
+    h.advance(mins(1));
+    rejected(h.guard.authenticate(&t0, &abroad()).await.unwrap());
+    let events = h.events.lock().unwrap();
+    let reuse = events.iter().find(|e| e.kind == EventKind::TokenReuse).unwrap();
+    assert_eq!(reuse.client.country.as_deref(), Some("DE"));
 }
 
 #[tokio::test]
@@ -1081,6 +1311,193 @@ async fn concurrent_requests_with_one_token_rotate_once() {
         .filter(|a| a.rotated.is_some())
         .count();
     assert_eq!(rotated, 1);
+}
+
+// --- losing a race ---
+
+/// What a concurrent request does to the session between this request's lookup and its write.
+#[derive(Clone, Copy)]
+enum Race {
+    /// Deletes the session.
+    Delete,
+    /// Completes a step-up: rotates the token and clears the flag.
+    StepUp,
+}
+
+/// A [`MemoryStore`] that lets a concurrent request win once, right after `find_by_token`.
+#[derive(Default)]
+struct RacingStore {
+    inner: MemoryStore,
+    race: Mutex<Option<Race>>,
+}
+
+impl RacingStore {
+    fn arm(&self, race: Race) {
+        *self.race.lock().unwrap() = Some(race);
+    }
+}
+
+impl SessionStore for RacingStore {
+    async fn insert_session(&self, session: &SessionRecord, token: &TokenHash) -> Result<(), crate::StoreError> {
+        self.inner.insert_session(session, token).await
+    }
+
+    async fn find_by_token(&self, token: &TokenHash) -> Result<Option<crate::store::TokenLookup>, crate::StoreError> {
+        let found = self.inner.find_by_token(token).await?;
+        let race = self.race.lock().unwrap().take();
+        if let (Some(race), Some(lookup)) = (race, &found) {
+            let id = lookup.session.id;
+            match race {
+                Race::Delete => {
+                    self.inner.delete_session(id).await?;
+                }
+                Race::StepUp => {
+                    let now = lookup.session.last_seen_at;
+                    let mut update = SessionUpdate::touch(id, now);
+                    update.step_up_required = Some(false);
+                    update.rotation = Some(Rotation {
+                        new_token: SessionToken::generate().unwrap().hash(),
+                        supersede: Supersede::Current,
+                        prune_superseded_before: now - chrono::TimeDelta::days(1),
+                    });
+                    self.inner.apply(&update).await?;
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    async fn apply(&self, update: &SessionUpdate) -> Result<bool, crate::StoreError> {
+        self.inner.apply(update).await
+    }
+
+    async fn delete_session(&self, session_id: Uuid) -> Result<bool, crate::StoreError> {
+        self.inner.delete_session(session_id).await
+    }
+
+    async fn delete_subject_sessions(&self, subject: &str) -> Result<Vec<Uuid>, crate::StoreError> {
+        self.inner.delete_subject_sessions(subject).await
+    }
+
+    async fn list_subject_sessions(&self, subject: &str) -> Result<Vec<SessionRecord>, crate::StoreError> {
+        self.inner.list_subject_sessions(subject).await
+    }
+
+    async fn delete_expired(&self, now: DateTime<Utc>, idle_cutoff: DateTime<Utc>) -> Result<u64, crate::StoreError> {
+        self.inner.delete_expired(now, idle_cutoff).await
+    }
+
+    async fn record_event(&self, event: &SessionEvent) -> Result<(), crate::StoreError> {
+        self.inner.record_event(event).await
+    }
+
+    async fn delete_events_before(&self, cutoff: DateTime<Utc>) -> Result<u64, crate::StoreError> {
+        self.inner.delete_events_before(cutoff).await
+    }
+}
+
+struct Racing {
+    guard: Guard<Arc<RacingStore>>,
+    store: Arc<RacingStore>,
+    clock: ManualClock,
+    events: Arc<Mutex<Vec<SessionEvent>>>,
+}
+
+impl Racing {
+    fn count(&self, kind: EventKind) -> usize {
+        self.events.lock().unwrap().iter().filter(|e| e.kind == kind).count()
+    }
+}
+
+fn racing() -> Racing {
+    let store = Arc::new(RacingStore::default());
+    let clock = ManualClock::new(start());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let guard = Guard::builder(Arc::clone(&store), GuardConfig::default())
+        .ip_intel(intel)
+        .clock(clock.clone())
+        .on_event(move |e| sink.lock().unwrap().push(e.clone()))
+        .build();
+    Racing {
+        guard,
+        store,
+        clock,
+        events,
+    }
+}
+
+#[tokio::test]
+async fn risk_revoke_lost_to_a_concurrent_delete_is_not_reported() {
+    let r = racing();
+    let t0 = r.guard.login(&Uuid::new_v4(), &home(), None).await.unwrap().token;
+    r.store.arm(Race::Delete);
+    assert_eq!(
+        rejected(r.guard.authenticate(t0.expose(), &attacker()).await.unwrap()),
+        Rejection::Revoked
+    );
+    assert_eq!(r.count(EventKind::RiskRevoked), 0);
+}
+
+/// A session whose first token was replayed after its successor was used.
+async fn reused(r: &Racing) -> String {
+    let t0 = r.guard.login(&Uuid::new_v4(), &home(), None).await.unwrap().token;
+    r.clock.advance(mins(11));
+    let t1 = authenticated(r.guard.authenticate(t0.expose(), &home()).await.unwrap())
+        .rotated
+        .unwrap();
+    authenticated(r.guard.authenticate(t1.expose(), &home()).await.unwrap());
+    r.clock.advance(mins(1));
+    t0.expose().to_owned()
+}
+
+#[tokio::test]
+async fn reuse_lost_to_a_concurrent_delete_is_not_reported() {
+    let r = racing();
+    let t0 = reused(&r).await;
+    r.store.arm(Race::Delete);
+    assert_eq!(
+        rejected(r.guard.authenticate(&t0, &home()).await.unwrap()),
+        Rejection::Revoked
+    );
+
+    let user = Uuid::new_v4();
+    let t0 = reused(&r).await;
+    r.store.arm(Race::Delete);
+    assert!(matches!(
+        r.guard.complete_step_up(&t0, &home(), &user).await.unwrap(),
+        StepUpOutcome::Rejected(Rejection::Revoked)
+    ));
+    assert_eq!(r.count(EventKind::TokenReuse), 0);
+}
+
+#[tokio::test]
+async fn step_up_completed_by_a_concurrent_request_is_reported_once() {
+    let r = racing();
+    let user = Uuid::new_v4();
+    let t0 = r.guard.login(&user, &home(), None).await.unwrap().token;
+    r.clock.advance(mins(1));
+    assert_eq!(
+        rejected(r.guard.authenticate(t0.expose(), &abroad()).await.unwrap()),
+        Rejection::StepUpRequired
+    );
+    assert_eq!(r.count(EventKind::StepUpRequired), 1);
+
+    // A double submit: the other request completed the step-up first. This one still gets a
+    // working token.
+    r.store.arm(Race::StepUp);
+    let StepUpOutcome::Completed(t1) = r.guard.complete_step_up(t0.expose(), &abroad(), &user).await.unwrap() else {
+        panic!("step-up should complete");
+    };
+    authenticated(r.guard.authenticate(t1.expose(), &abroad()).await.unwrap());
+    assert_eq!(r.count(EventKind::StepUpCompleted), 0);
+
+    r.store.arm(Race::Delete);
+    assert!(matches!(
+        r.guard.complete_step_up(t1.expose(), &abroad(), &user).await.unwrap(),
+        StepUpOutcome::Rejected(Rejection::Revoked)
+    ));
+    assert_eq!(r.count(EventKind::StepUpCompleted), 0);
 }
 
 // --- token prefix ---

@@ -9,7 +9,7 @@ use std::{
 use chrono::{DateTime, TimeDelta, Utc};
 use uuid::Uuid;
 
-use super::{SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
+use super::{ClaimScope, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
 use crate::{
     error::StoreError,
     event::{EventKind, SessionEvent},
@@ -28,7 +28,14 @@ struct State {
     sessions: HashMap<Uuid, Entry>,
     token_index: HashMap<TokenHash, Uuid>,
     events: Vec<SessionEvent>,
-    claims: HashMap<(Uuid, EventKind), DateTime<Utc>>,
+    claims: HashMap<(ClaimKey, EventKind), DateTime<Utc>>,
+}
+
+/// An owned [`ClaimScope`].
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum ClaimKey {
+    Session(Uuid),
+    Subject(String),
 }
 
 #[derive(Debug)]
@@ -184,7 +191,7 @@ impl SessionStore for MemoryStore {
         self.with(|state| state.remove(session_id))
     }
 
-    fn delete_subject_sessions(&self, subject: &str) -> impl Future<Output = Result<u64, StoreError>> + Send {
+    fn delete_subject_sessions(&self, subject: &str) -> impl Future<Output = Result<Vec<Uuid>, StoreError>> + Send {
         self.with(|state| {
             let ids: Vec<Uuid> = state
                 .sessions
@@ -192,7 +199,7 @@ impl SessionStore for MemoryStore {
                 .filter(|e| e.record.subject == subject)
                 .map(|e| e.record.id)
                 .collect();
-            ids.into_iter().filter(|id| state.remove(*id)).count() as u64
+            ids.into_iter().filter(|id| state.remove(*id)).collect()
         })
     }
 
@@ -241,15 +248,19 @@ impl SessionStore for MemoryStore {
 
     fn claim_event(
         &self,
-        session_id: Uuid,
+        scope: ClaimScope<'_>,
         kind: EventKind,
         now: DateTime<Utc>,
         window: TimeDelta,
     ) -> impl Future<Output = Result<bool, StoreError>> + Send {
-        self.with(|state| match state.claims.get(&(session_id, kind)) {
+        let key = match scope {
+            ClaimScope::Session(id) => (ClaimKey::Session(id), kind),
+            ClaimScope::Subject(subject) => (ClaimKey::Subject(subject.to_owned()), kind),
+        };
+        self.with(|state| match state.claims.get(&key) {
             Some(at) if now - *at < window => false,
             _ => {
-                state.claims.insert((session_id, kind), now);
+                state.claims.insert(key, now);
                 true
             }
         })

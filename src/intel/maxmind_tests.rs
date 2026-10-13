@@ -48,6 +48,10 @@ mod mmdb {
         uint(9, value)
     }
 
+    pub fn bool(value: bool) -> Vec<u8> {
+        ctrl(14, usize::from(value))
+    }
+
     pub fn map(pairs: &[(&str, Vec<u8>)]) -> Vec<u8> {
         let mut out = ctrl(7, pairs.len());
         for (key, value) in pairs {
@@ -99,26 +103,43 @@ mod mmdb {
         out
     }
 
+    /// A City edition names the city; a Country edition has no `city` at all.
     pub fn country(database_type: &str, iso: &str) -> Vec<u8> {
-        let record = map(&[
-            ("city", map(&[("geoname_id", u32(2_800_866))])),
-            ("country", map(&[("iso_code", string(iso))])),
-        ]);
-        build(database_type, Some(record), None)
+        let mut pairs = Vec::new();
+        if database_type.contains("City") {
+            let names = map(&[("de", string("Brüssel")), ("en", string(super::CITY))]);
+            pairs.push(("city", map(&[("geoname_id", u32(2_800_866)), ("names", names)])));
+        }
+        pairs.push(("country", map(&[("iso_code", string(iso))])));
+        build(database_type, Some(map(&pairs)), None)
     }
 
     pub fn asn(number: u32) -> Vec<u8> {
         let record = map(&[
             ("autonomous_system_number", u32(number)),
-            ("autonomous_system_organization", string("Example")),
+            ("autonomous_system_organization", string(super::NETWORK)),
         ]);
         build("GeoLite2-ASN", Some(record), None)
+    }
+
+    /// An Anonymous IP database flagging 0.0.0.0/1 with `flags`, as `MaxMind` does: flags are
+    /// only present when true.
+    pub fn anonymizer(flags: &[&str], confidence: Option<u16>) -> Vec<u8> {
+        let mut pairs: Vec<(&str, Vec<u8>)> = vec![("is_anonymous", bool(true))];
+        pairs.extend(flags.iter().map(|flag| (*flag, bool(true))));
+        pairs.extend(confidence.map(|value| ("anonymizer_confidence", u16(value))));
+        build("GeoIP2-Anonymous-IP", Some(map(&pairs)), None)
     }
 }
 
 fn ip(s: &str) -> IpAddr {
     s.parse().unwrap()
 }
+
+/// The city every City-edition fixture names.
+const CITY: &str = "Brussels";
+/// The organization every ASN fixture names.
+const NETWORK: &str = "Example Telecom";
 
 fn info(country: Option<&str>, asn: Option<u32>) -> IpInfo {
     IpInfo::new(country.map(str::to_owned), asn)
@@ -139,13 +160,41 @@ fn country_database_yields_iso_code() {
 #[test]
 fn city_database_is_accepted_for_country() {
     let intel = MaxMindIntel::from_bytes(mmdb::country("GeoLite2-City", "NL"), None).unwrap();
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("NL"), None));
+    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("NL"), None).with_city(CITY));
+}
+
+#[test]
+fn city_database_yields_the_city() {
+    let intel = MaxMindIntel::from_bytes(mmdb::country("GeoIP2-City", "BE"), None).unwrap();
+    assert_eq!(intel.lookup(ip("1.2.3.4")).city.as_deref(), Some(CITY));
+}
+
+#[test]
+fn country_database_yields_no_city() {
+    let intel = MaxMindIntel::from_bytes(mmdb::country("GeoLite2-Country", "BE"), None).unwrap();
+    assert_eq!(intel.lookup(ip("1.2.3.4")).city, None);
 }
 
 #[test]
 fn asn_database_yields_number() {
     let intel = MaxMindIntel::from_bytes(mmdb::country("GeoIP2-Country", "BE"), Some(mmdb::asn(5432))).unwrap();
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("BE"), Some(5432)));
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("BE"), Some(5432)).with_network(NETWORK)
+    );
+}
+
+#[test]
+fn asn_database_yields_the_network_name() {
+    let intel = MaxMindIntel::from_bytes(mmdb::country("GeoLite2-Country", "BE"), Some(mmdb::asn(5432))).unwrap();
+    assert_eq!(intel.lookup(ip("1.2.3.4")).network.as_deref(), Some(NETWORK));
+}
+
+#[test]
+fn no_asn_database_yields_no_network() {
+    let intel = MaxMindIntel::from_bytes(mmdb::country("GeoLite2-City", "BE"), None).unwrap();
+    let found = intel.lookup(ip("1.2.3.4"));
+    assert_eq!((found.asn, found.network), (None, None));
 }
 
 #[test]
@@ -158,7 +207,10 @@ fn unknown_addresses_yield_empty_info() {
 fn ipv6_in_ipv4_database_yields_empty_info_and_mapped_addresses_resolve() {
     let intel = MaxMindIntel::from_bytes(mmdb::country("GeoLite2-Country", "BE"), Some(mmdb::asn(5432))).unwrap();
     assert_eq!(intel.lookup(ip("2001:db8::1")), IpInfo::default());
-    assert_eq!(intel.lookup(ip("::ffff:1.2.3.4")), info(Some("BE"), Some(5432)));
+    assert_eq!(
+        intel.lookup(ip("::ffff:1.2.3.4")),
+        info(Some("BE"), Some(5432)).with_network(NETWORK)
+    );
 }
 
 #[test]
@@ -240,7 +292,10 @@ fn opens_files() {
     let country = temp_file("country.mmdb", &mmdb::country("GeoLite2-City", "BE"));
     let asn = temp_file("asn.mmdb", &mmdb::asn(64_500));
     let intel = MaxMindIntel::open(&country, Some(&asn)).unwrap();
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("BE"), Some(64_500)));
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("BE"), Some(64_500)).with_city(CITY).with_network(NETWORK)
+    );
     std::fs::remove_file(country).unwrap();
     std::fs::remove_file(asn).unwrap();
 }
@@ -252,12 +307,18 @@ fn reload_swaps_databases_and_failed_reload_keeps_the_old_ones() {
     intel
         .reload_from_bytes(mmdb::country("GeoLite2-Country", "FR"), Some(mmdb::asn(7)))
         .unwrap();
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("FR"), Some(7)));
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("FR"), Some(7)).with_network(NETWORK)
+    );
 
     assert!(intel.reload_from_bytes(b"garbage".to_vec(), None).is_err());
     let missing = std::env::temp_dir().join("session-guard-missing-reload.mmdb");
     assert!(intel.reload(&missing, None::<&str>).is_err());
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("FR"), Some(7)));
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("FR"), Some(7)).with_network(NETWORK)
+    );
 
     let country = temp_file("reload.mmdb", &mmdb::country("GeoLite2-Country", "DE"));
     intel.reload(&country, None::<&str>).unwrap();
@@ -308,13 +369,19 @@ fn reload_if_changed_picks_up_replaced_files() {
 
     replace_file(&country, &mmdb::country("GeoLite2-Country", "FR"), at(2));
     assert!(intel.reload_if_changed().unwrap());
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("FR"), Some(1)));
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("FR"), Some(1)).with_network(NETWORK)
+    );
     assert!(!intel.reload_if_changed().unwrap());
 
     // A change to the ASN database alone is enough.
     replace_file(&asn, &mmdb::asn(2), at(3));
     assert!(intel.reload_if_changed().unwrap());
-    assert_eq!(intel.lookup(ip("1.2.3.4")), info(Some("FR"), Some(2)));
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("FR"), Some(2)).with_network(NETWORK)
+    );
     assert!(!intel.reload_if_changed().unwrap());
 
     std::fs::remove_file(country).unwrap();
@@ -400,6 +467,242 @@ async fn spawn_reload_picks_up_changes_and_survives_failures() {
     std::fs::remove_file(country).unwrap();
 }
 
+fn country_be() -> Vec<u8> {
+    mmdb::country("GeoLite2-Country", "BE")
+}
+
+fn anonymity(intel: &MaxMindIntel, address: &str) -> Option<Anonymity> {
+    intel.lookup(ip(address)).anonymity
+}
+
+fn with_anonymizer(country: Vec<u8>, flags: &[&str]) -> MaxMindIntel {
+    MaxMindIntel::from_bytes(country, None)
+        .unwrap()
+        .with_anonymizer_bytes(mmdb::anonymizer(flags, None))
+        .unwrap()
+}
+
+#[test]
+fn anonymizer_flags_map_to_the_most_severe_anonymity() {
+    use Anonymity::{Direct, HostingProvider, PublicProxy, ResidentialProxy, TorExitNode, Vpn};
+    let cases: [(&[&str], Option<u16>, Anonymity); 10] = [
+        (
+            &[
+                "is_tor_exit_node",
+                "is_public_proxy",
+                "is_anonymous_vpn",
+                "is_hosting_provider",
+            ],
+            Some(99),
+            TorExitNode,
+        ),
+        (
+            &["is_public_proxy", "is_residential_proxy", "is_anonymous_vpn"],
+            Some(99),
+            PublicProxy,
+        ),
+        (
+            &["is_residential_proxy", "is_anonymous_vpn", "is_hosting_provider"],
+            Some(99),
+            ResidentialProxy,
+        ),
+        (&["is_anonymous_vpn", "is_hosting_provider"], Some(99), Vpn),
+        (&["is_anonymous_vpn"], Some(50), Vpn),
+        (&["is_anonymous_vpn"], None, Vpn),
+        // Low confidence that the network is a VPN: only the other flags count.
+        (&["is_anonymous_vpn", "is_hosting_provider"], Some(30), HostingProvider),
+        (&["is_anonymous_vpn"], Some(30), Direct),
+        (&["is_hosting_provider"], None, HostingProvider),
+        (&[], None, Direct),
+    ];
+    for (flags, confidence, expected) in cases {
+        let intel = MaxMindIntel::from_bytes(country_be(), None)
+            .unwrap()
+            .with_anonymizer_bytes(mmdb::anonymizer(flags, confidence))
+            .unwrap();
+        assert_eq!(anonymity(&intel, "1.2.3.4"), Some(expected), "{flags:?} {confidence:?}");
+    }
+}
+
+#[test]
+fn unlisted_addresses_are_direct_and_unknown_without_an_anonymizer() {
+    let intel = MaxMindIntel::from_bytes(country_be(), Some(mmdb::asn(5432))).unwrap();
+    assert_eq!(anonymity(&intel, "1.2.3.4"), None);
+
+    let intel = intel
+        .with_anonymizer_bytes(mmdb::anonymizer(&["is_anonymous_vpn"], None))
+        .unwrap();
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("BE"), Some(5432))
+            .with_network(NETWORK)
+            .with_anonymity(Anonymity::Vpn)
+    );
+    assert_eq!(anonymity(&intel, "200.1.2.3"), Some(Anonymity::Direct));
+    assert_eq!(anonymity(&intel, "2001:db8::1"), None, "a failed lookup is unknown");
+}
+
+#[test]
+fn anonymizer_opens_from_a_file() {
+    let anonymizer = temp_file("anonymizer.mmdb", &mmdb::anonymizer(&["is_tor_exit_node"], None));
+    let intel = MaxMindIntel::from_bytes(country_be(), None)
+        .unwrap()
+        .with_anonymizer(&anonymizer)
+        .unwrap();
+    assert_eq!(anonymity(&intel, "1.2.3.4"), Some(Anonymity::TorExitNode));
+    std::fs::remove_file(anonymizer).unwrap();
+
+    let missing = std::env::temp_dir().join("session-guard-missing-anonymizer.mmdb");
+    let err = MaxMindIntel::from_bytes(country_be(), None)
+        .unwrap()
+        .with_anonymizer(&missing)
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            MaxMindError::Io {
+                database: MaxMindDatabase::Anonymizer,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("MaxMind anonymizer database"), "{err}");
+}
+
+#[test]
+fn anonymizer_databases_only_fit_the_anonymizer_slot() {
+    let wrong = |err: MaxMindError, slot: MaxMindDatabase| {
+        assert!(
+            matches!(&err, MaxMindError::WrongDatabase { database, .. } if *database == slot),
+            "{err:?}"
+        );
+    };
+    for kind in ["GeoIP2-Anonymous-IP", "GeoIP-Anonymous-Plus", "GeoIP2-IP-Risk"] {
+        let bytes = mmdb::build(kind, Some(mmdb::map(&[])), None);
+        wrong(
+            MaxMindIntel::from_bytes(bytes.clone(), None).unwrap_err(),
+            MaxMindDatabase::Country,
+        );
+        wrong(
+            MaxMindIntel::from_bytes(country_be(), Some(bytes.clone())).unwrap_err(),
+            MaxMindDatabase::Asn,
+        );
+        let intel = MaxMindIntel::from_bytes(country_be(), None).unwrap();
+        assert!(intel.with_anonymizer_bytes(bytes).is_ok(), "{kind}");
+    }
+    for bytes in [mmdb::country("GeoLite2-City", "BE"), mmdb::asn(1)] {
+        let intel = MaxMindIntel::from_bytes(country_be(), None).unwrap();
+        wrong(
+            intel.with_anonymizer_bytes(bytes).unwrap_err(),
+            MaxMindDatabase::Anonymizer,
+        );
+    }
+    let intel = MaxMindIntel::from_bytes(country_be(), None).unwrap();
+    let err = intel.with_anonymizer_bytes(b"garbage".to_vec()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            MaxMindError::Invalid {
+                database: MaxMindDatabase::Anonymizer,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn reload_keeps_the_anonymizer_and_reload_anonymizer_swaps_it() {
+    let intel = with_anonymizer(country_be(), &["is_anonymous_vpn"]);
+    let vpn = |iso| info(Some(iso), None).with_anonymity(Anonymity::Vpn);
+
+    intel
+        .reload_from_bytes(mmdb::country("GeoLite2-Country", "FR"), None)
+        .unwrap();
+    assert_eq!(intel.lookup(ip("1.2.3.4")), vpn("FR"));
+    let country = temp_file("keeps-anonymizer.mmdb", &mmdb::country("GeoLite2-Country", "DE"));
+    intel.reload(&country, None::<&str>).unwrap();
+    assert_eq!(intel.lookup(ip("1.2.3.4")), vpn("DE"));
+
+    intel
+        .reload_anonymizer_from_bytes(mmdb::anonymizer(&["is_tor_exit_node"], None))
+        .unwrap();
+    assert_eq!(anonymity(&intel, "1.2.3.4"), Some(Anonymity::TorExitNode));
+    assert!(intel.reload_anonymizer_from_bytes(b"garbage".to_vec()).is_err());
+    assert!(intel.reload_anonymizer(&country).is_err());
+    assert_eq!(anonymity(&intel, "1.2.3.4"), Some(Anonymity::TorExitNode));
+
+    let anonymizer = temp_file("swapped-anonymizer.mmdb", &mmdb::anonymizer(&["is_public_proxy"], None));
+    intel.reload_anonymizer(&anonymizer).unwrap();
+    assert_eq!(anonymity(&intel, "1.2.3.4"), Some(Anonymity::PublicProxy));
+    assert_eq!(intel.lookup(ip("1.2.3.4")).country.as_deref(), Some("DE"));
+
+    std::fs::remove_file(country).unwrap();
+    std::fs::remove_file(anonymizer).unwrap();
+}
+
+#[test]
+fn reload_if_changed_follows_the_anonymizer_file_on_its_own() {
+    let country = temp_file("own-country.mmdb", &country_be());
+    let anonymizer = temp_file("own-anonymizer.mmdb", &mmdb::anonymizer(&["is_anonymous_vpn"], None));
+    let intel = MaxMindIntel::open(&country, None::<&str>)
+        .unwrap()
+        .with_anonymizer(&anonymizer)
+        .unwrap();
+    assert!(!intel.reload_if_changed().unwrap());
+
+    replace_file(&anonymizer, &mmdb::anonymizer(&["is_tor_exit_node"], None), at(2));
+    assert!(intel.reload_if_changed().unwrap());
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("BE"), None).with_anonymity(Anonymity::TorExitNode)
+    );
+    assert!(!intel.reload_if_changed().unwrap());
+
+    // A broken anonymizer update does not hold back the country database, and is retried.
+    replace_file(&anonymizer, b"garbage", at(3));
+    replace_file(&country, &mmdb::country("GeoLite2-Country", "FR"), at(3));
+    assert!(intel.reload_if_changed().is_err());
+    assert_eq!(
+        intel.lookup(ip("1.2.3.4")),
+        info(Some("FR"), None).with_anonymity(Anonymity::TorExitNode)
+    );
+    replace_file(&anonymizer, &mmdb::anonymizer(&["is_public_proxy"], None), at(4));
+    assert!(intel.reload_if_changed().unwrap());
+    assert_eq!(anonymity(&intel, "1.2.3.4"), Some(Anonymity::PublicProxy));
+
+    // Country databases from bytes still leave the anonymizer file followed.
+    intel.reload_from_bytes(country_be(), None).unwrap();
+    replace_file(&anonymizer, &mmdb::anonymizer(&["is_anonymous_vpn"], None), at(5));
+    assert!(intel.reload_if_changed().unwrap());
+    assert_eq!(anonymity(&intel, "1.2.3.4"), Some(Anonymity::Vpn));
+
+    // An anonymizer from bytes has no file to follow.
+    intel
+        .reload_anonymizer_from_bytes(mmdb::anonymizer(&["is_hosting_provider"], None))
+        .unwrap();
+    replace_file(&anonymizer, &mmdb::anonymizer(&["is_tor_exit_node"], None), at(6));
+    assert!(!intel.reload_if_changed().unwrap());
+    assert_eq!(anonymity(&intel, "1.2.3.4"), Some(Anonymity::HostingProvider));
+
+    std::fs::remove_file(country).unwrap();
+    std::fs::remove_file(anonymizer).unwrap();
+}
+
+#[test]
+fn debug_names_the_databases_and_files() {
+    let anonymizer = temp_file("debug-anonymizer.mmdb", &mmdb::anonymizer(&[], None));
+    let intel = MaxMindIntel::from_bytes(country_be(), None)
+        .unwrap()
+        .with_anonymizer(&anonymizer)
+        .unwrap();
+    let debug = format!("{intel:?}");
+    assert!(debug.contains("GeoIP2-Anonymous-IP"), "{debug}");
+    assert!(debug.contains("debug-anonymizer.mmdb"), "{debug}");
+    std::fs::remove_file(anonymizer).unwrap();
+}
+
 #[test]
 fn plugs_into_the_guard() {
     let intel = MaxMindIntel::from_bytes(mmdb::country("GeoLite2-Country", "BE"), None).unwrap();
@@ -423,6 +726,10 @@ fn real_database_from_env() {
     assert_eq!(found.country.as_deref(), Some("US"));
     if asn.is_some() {
         assert_eq!(found.asn, Some(15169));
+        assert!(
+            found.network.as_deref().is_some_and(|name| name.contains("GOOGLE")),
+            "{found:?}"
+        );
     }
     assert_eq!(intel.lookup(ip("10.0.0.1")), IpInfo::default());
 }

@@ -733,7 +733,7 @@ impl SessionStore for FailingStore {
     async fn delete_session(&self, _: Uuid) -> Result<bool, StoreError> {
         fail()
     }
-    async fn delete_subject_sessions(&self, _: &str) -> Result<u64, StoreError> {
+    async fn delete_subject_sessions(&self, _: &str) -> Result<Vec<Uuid>, StoreError> {
         fail()
     }
     async fn list_subject_sessions(&self, _: &str) -> Result<Vec<SessionRecord>, StoreError> {

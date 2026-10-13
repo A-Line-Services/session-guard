@@ -7,11 +7,11 @@ use redis::{Script, aio::ConnectionManager};
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::{SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
+use super::{ClaimScope, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
 use crate::{
     checks::Check,
     error::StoreError,
-    event::{EventKind, SessionEvent},
+    event::{ClientSummary, EventKind, SessionEvent, SessionOrigin},
     fingerprint::Baseline,
     token::TokenHash,
 };
@@ -25,9 +25,9 @@ macro_rules! lua_helpers {
         r"
 local function read_session(P, sid)
   local v = redis.call('HMGET', P .. 's:' .. sid,
-    'subject', 'created', 'auth', 'seen', 'expires', 'step_up', 'baseline')
+    'subject', 'created', 'auth', 'seen', 'expires', 'step_up', 'baseline', 'origin')
   if not v[1] then return nil end
-  return {sid, v[1], v[2], v[3], v[4], v[5], v[6], v[7]}
+  return {sid, v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8] or ''}
 end
 
 local function del_session(P, sid)
@@ -53,7 +53,7 @@ end
 
 /// KEYS: session, token, token set, subject set.
 /// ARGV: prefix, sid, token hex, subject, created, auth, seen, expires, `step_up`, baseline,
-/// `exp_ms`.
+/// `exp_ms`, origin or `''`.
 static INSERT: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r"
@@ -62,6 +62,7 @@ if redis.call('EXISTS', KEYS[1]) == 1 or redis.call('EXISTS', KEYS[2]) == 1 then
 redis.call('HSET', KEYS[1], 'subject', ARGV[4], 'created', ARGV[5], 'auth', ARGV[6],
   'seen', ARGV[7], 'expires', ARGV[8], 'step_up', ARGV[9], 'baseline', ARGV[10],
   'exp_ms', ARGV[11], 'cur', ARGV[3], 'seq', 1)
+if ARGV[12] ~= '' then redis.call('HSET', KEYS[1], 'origin', ARGV[12]) end
 redis.call('HSET', KEYS[2], 'sid', ARGV[2], 'seq', 1, 'issued', ARGV[5])
 redis.call('ZADD', KEYS[3], 1, ARGV[3])
 redis.call('SADD', KEYS[4], ARGV[2])
@@ -94,10 +95,10 @@ for _, hex in ipairs(redis.call('ZRANGEBYSCORE', P .. 'k:' .. t[1], '(' .. t[2],
     break
   end
 end
-rec[9] = t[3]
-rec[10] = t[4] or ''
-rec[11] = t[5] or ''
-rec[12] = tostring(newer)
+rec[10] = t[3]
+rec[11] = t[4] or ''
+rec[12] = t[5] or ''
+rec[13] = tostring(newer)
 return rec
 ",
     ))
@@ -173,12 +174,14 @@ static DELETE_SUBJECT: LazyLock<Script> = LazyLock::new(|| {
     Script::new(concat!(
         lua_helpers!(),
         r"
-local n = 0
+local out = {}
 for _, sid in ipairs(redis.call('SMEMBERS', KEYS[1])) do
-  n = n + del_session(ARGV[1], sid)
+  if del_session(ARGV[1], sid) == 1 then
+    out[#out + 1] = sid
+  end
 end
 redis.call('DEL', KEYS[1])
-return n
+return out
 ",
     ))
 });
@@ -261,15 +264,16 @@ return 1
 ///
 /// | Key | Type | Contents |
 /// |-----|------|----------|
-/// | `P s:{session id}` | hash | `subject`, `created`, `auth`, `seen`, `expires`, `step_up`, `baseline` (JSON), `cur` (current token), `seq` (token counter), `exp_ms` |
+/// | `P s:{session id}` | hash | `subject`, `created`, `auth`, `seen`, `expires`, `step_up`, `baseline` (JSON), `origin` (JSON, absent before 0.2), `cur` (current token), `seq` (token counter), `exp_ms` |
 /// | `P t:{token hash hex}` | hash | `sid`, `seq` (issue order), `issued`, `used`, `sup` (superseded) |
 /// | `P k:{session id}` | sorted set | the session's token hashes, scored by `seq` |
 /// | `P u:{subject}` | set | session ids of a subject |
 /// | `P x` | sorted set | session ids scored by `expires_at` |
 /// | `P i` | sorted set | session ids scored by `last_seen_at` |
 /// | `P e` | sorted set | events as JSON, scored by `at` |
-/// | `P c:{session id}:{kind}` | string | time of the last event claim |
-/// | `P cz` | sorted set | `{session id}:{kind}` claims scored by claim time |
+/// | `P c:{session id}:{kind}` | string | time of the last session event claim |
+/// | `P c:s:{subject}:{kind}` | string | time of the last subject alert claim |
+/// | `P cz` | sorted set | `{session id}:{kind}` and `s:{subject}:{kind}` claims scored by claim time |
 ///
 /// Session, token and per-session token-set keys expire at the session's absolute expiry and
 /// subject sets at their last session's expiry, so Valkey cleans up even if
@@ -351,12 +355,17 @@ fn parse_optional_time(value: &str) -> Result<Option<DateTime<Utc>>, StoreError>
     }
 }
 
-/// Parses the eight fields `read_session` returns.
+/// Parses the nine fields `read_session` returns.
 fn parse_session(fields: &[String]) -> Result<SessionRecord, StoreError> {
-    let [id, subject, created, auth, seen, expires, step_up, baseline] = fields else {
+    let [id, subject, created, auth, seen, expires, step_up, baseline, origin] = fields else {
         return Err("valkey store: malformed session".into());
     };
     let baseline: Baseline = serde_json::from_str(baseline)?;
+    let origin: Option<SessionOrigin> = if origin.is_empty() {
+        None
+    } else {
+        Some(serde_json::from_str(origin)?)
+    };
     Ok(SessionRecord {
         id: Uuid::parse_str(id)?,
         subject: subject.clone(),
@@ -366,6 +375,7 @@ fn parse_session(fields: &[String]) -> Result<SessionRecord, StoreError> {
         expires_at: parse_time(expires)?,
         step_up_required: step_up == "1",
         baseline,
+        origin,
     })
 }
 
@@ -381,6 +391,7 @@ struct EventRow<'a> {
     signals: &'a [Check],
     ip: IpAddr,
     user_agent: Option<&'a str>,
+    client: &'a ClientSummary,
     at: DateTime<Utc>,
 }
 
@@ -409,6 +420,10 @@ impl SessionStore for ValkeyStore {
             .arg(if session.step_up_required { "1" } else { "0" })
             .arg(serde_json::to_string(&session.baseline)?)
             .arg(exp_ms)
+            .arg(match &session.origin {
+                Some(origin) => serde_json::to_string(origin)?,
+                None => String::new(),
+            })
             .invoke_async(&mut self.conn())
             .await?;
         if inserted == 1 {
@@ -496,13 +511,13 @@ impl SessionStore for ValkeyStore {
         Ok(deleted == 1)
     }
 
-    async fn delete_subject_sessions(&self, subject: &str) -> Result<u64, StoreError> {
-        let deleted: u64 = DELETE_SUBJECT
+    async fn delete_subject_sessions(&self, subject: &str) -> Result<Vec<Uuid>, StoreError> {
+        let deleted: Vec<String> = DELETE_SUBJECT
             .key(self.key("u", subject))
             .arg(&self.prefix)
             .invoke_async(&mut self.conn())
             .await?;
-        Ok(deleted)
+        Ok(deleted.iter().map(|id| Uuid::parse_str(id)).collect::<Result<_, _>>()?)
     }
 
     async fn list_subject_sessions(&self, subject: &str) -> Result<Vec<SessionRecord>, StoreError> {
@@ -542,6 +557,7 @@ impl SessionStore for ValkeyStore {
             signals: &event.signals,
             ip: event.ip,
             user_agent: event.user_agent.as_deref(),
+            client: &event.client,
             at: event.at,
         };
         let _added: i64 = redis::cmd("ZADD")
@@ -566,12 +582,16 @@ impl SessionStore for ValkeyStore {
 
     async fn claim_event(
         &self,
-        session_id: Uuid,
+        scope: ClaimScope<'_>,
         kind: EventKind,
         now: DateTime<Utc>,
         window: TimeDelta,
     ) -> Result<bool, StoreError> {
-        let member = format!("{session_id}:{kind}");
+        // A session id never starts with `s:`, and no kind contains `:`, so members are unique.
+        let member = match scope {
+            ClaimScope::Session(session_id) => format!("{session_id}:{kind}"),
+            ClaimScope::Subject(subject) => format!("s:{subject}:{kind}"),
+        };
         let micros_window = window.num_microseconds().unwrap_or(i64::MAX);
         let millis_window = window.num_milliseconds().max(1);
         let claimed: i64 = CLAIM

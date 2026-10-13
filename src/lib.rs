@@ -4,8 +4,8 @@
 //! A [`Guard`] issues opaque session tokens, stores only their SHA-256 hashes, rotates them
 //! every few minutes and revokes the session when a superseded token comes back after its
 //! successor was used: the signature of a copied cookie. Every request is also scored against
-//! the session's client fingerprint (OS, browser, client hints, country, network); a moderate
-//! change asks the app to re-verify the subject, a drastic one revokes the session.
+//! the session's client fingerprint (OS, browser, client hints, country, network, anonymizers);
+//! a moderate change asks the app to re-verify the subject, a drastic one revokes the session.
 //!
 //! The crate handles sessions only. Logging in, verifying passwords and rate limiting stay in
 //! the app.
@@ -98,7 +98,7 @@ pub mod __bench {
         }
 
         /// [`Fingerprint::capture`], parsing the User-Agent through the cache.
-        pub fn capture(&self, ctx: &ClientContext, info: IpInfo) -> Fingerprint {
+        pub fn capture(&self, ctx: &ClientContext, info: &IpInfo) -> Fingerprint {
             Fingerprint::capture_cached(ctx, info, &self.0)
         }
     }
@@ -113,13 +113,13 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{GuardConfig, GuardConfigBuilder, Mode, RotationConfig, StepUpPolicy};
 pub use cookie::{CookieConfig, SameSite, find_cookie};
 pub use error::{ConfigError, GuardError, StoreError};
-pub use event::{EventKind, SessionEvent};
+pub use event::{ClientSummary, EventKind, SessionEvent, SessionOrigin};
 pub use fingerprint::{Baseline, Fingerprint, ip_prefix};
 pub use guard::{
     AuthSession, Authenticated, Guard, GuardBuilder, IssuedToken, NewSession, Outcome, PurgeReport, Rejection,
     SessionInfo, StepUpOutcome,
 };
-pub use intel::{IpInfo, IpIntel, NoIpIntel};
+pub use intel::{Anonymity, IpInfo, IpIntel, NoIpIntel};
 #[cfg(feature = "maxmind")]
 #[cfg_attr(docsrs, doc(cfg(feature = "maxmind")))]
 pub use intel::{MaxMindDatabase, MaxMindError, MaxMindIntel};
@@ -131,7 +131,7 @@ pub use store::PgStore;
 #[cfg_attr(docsrs, doc(cfg(feature = "valkey")))]
 pub use store::ValkeyStore;
 pub use store::{
-    MemoryStore, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord,
+    ClaimScope, MemoryStore, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord,
 };
 pub use subject::Subject;
 pub use token::{SessionToken, TOKEN_LEN, TokenHash, is_well_formed};

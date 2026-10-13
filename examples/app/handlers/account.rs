@@ -5,13 +5,16 @@ use rovo::{
     response::Json,
     rovo,
 };
-use session_guard::AuthSession;
+use session_guard::{AuthSession, Sessions};
 use uuid::Uuid;
 
-use crate::app::{
-    errors::AppError,
-    models::{Done, ErrorBody, Me, SessionView},
-    state::AppState,
+use crate::{
+    Store,
+    app::{
+        errors::AppError,
+        models::{Done, ErrorBody, Me, SessionView},
+        state::AppState,
+    },
 };
 
 /// The signed-in user.
@@ -75,18 +78,19 @@ pub async fn list_sessions(
 /// # Metadata
 ///
 /// @tag account
-#[rovo]
+#[rovo(state = AppState)]
 pub async fn revoke_session(
-    State(state): State<AppState>,
     session: AuthSession<Uuid>,
+    sessions: Sessions<Store>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Done>, AppError> {
-    // `revoke_session` takes any id, so check ownership first: otherwise a user could revoke
-    // someone else's session.
-    let sessions = state.guard.list_sessions(&session.subject).await?;
-    if !sessions.iter().any(|s| s.session_id == id) {
+    // Scoped to the signed-in user: someone else's session id is a 404.
+    if !sessions
+        .guard()
+        .revoke_session(&session.subject, id, sessions.client())
+        .await?
+    {
         return Err(AppError::NotFound);
     }
-    state.guard.revoke_session(id).await?;
     Ok(Json(Done { ok: true }))
 }

@@ -83,8 +83,10 @@ pub struct GuardConfig {
     pub(crate) ping_pong_window: TimeDelta,
     pub(crate) last_seen_write_interval: TimeDelta,
     pub(crate) event_retention: TimeDelta,
-    pub(crate) minimize_event_ip: bool,
+    pub(crate) minimize_stored_events: bool,
+    pub(crate) keep_origin_client: bool,
     pub(crate) shadow_dedup_window: TimeDelta,
+    pub(crate) alert_dedup_window: TimeDelta,
     pub(crate) max_header_len: usize,
     pub(crate) token_prefix: Option<String>,
     pub(crate) orphan_reissue_window: Option<TimeDelta>,
@@ -174,14 +176,27 @@ impl GuardConfig {
         to_std(self.event_retention)
     }
 
-    /// Whether events store only the IP prefix (/24 or /48) instead of the full address.
-    pub fn minimize_event_ip(&self) -> bool {
-        self.minimize_event_ip
+    /// Whether the store gets a reduced copy of each event; see
+    /// [`GuardConfigBuilder::minimize_stored_events`].
+    pub fn minimize_stored_events(&self) -> bool {
+        self.minimize_stored_events
+    }
+
+    /// Whether a session's origin keeps the full IP, User-Agent and city; see
+    /// [`GuardConfigBuilder::keep_origin_client`].
+    pub fn keep_origin_client(&self) -> bool {
+        self.keep_origin_client
     }
 
     /// Window in which repeated shadow events for the same session and kind are dropped.
     pub fn shadow_dedup_window(&self) -> Duration {
         to_std(self.shadow_dedup_window)
+    }
+
+    /// Window in which repeated security alerts for the same subject and kind skip the hook.
+    /// Zero means off.
+    pub fn alert_dedup_window(&self) -> Duration {
+        to_std(self.alert_dedup_window)
     }
 
     /// Maximum length of a header value considered for fingerprinting.
@@ -221,8 +236,10 @@ pub struct GuardConfigBuilder {
     ping_pong_window: Duration,
     last_seen_write_interval: Duration,
     event_retention: Duration,
-    minimize_event_ip: bool,
+    minimize_stored_events: bool,
+    keep_origin_client: bool,
     shadow_dedup_window: Duration,
+    alert_dedup_window: Duration,
     max_header_len: usize,
     token_prefix: Option<String>,
     orphan_reissue_window: Option<Duration>,
@@ -246,8 +263,10 @@ impl Default for GuardConfigBuilder {
             ping_pong_window: Duration::from_secs(5 * MINUTE),
             last_seen_write_interval: Duration::from_secs(MINUTE),
             event_retention: Duration::from_secs(90 * DAY),
-            minimize_event_ip: false,
+            minimize_stored_events: true,
+            keep_origin_client: false,
             shadow_dedup_window: Duration::from_secs(10 * MINUTE),
+            alert_dedup_window: Duration::ZERO,
             max_header_len: 512,
             token_prefix: None,
             orphan_reissue_window: None,
@@ -373,15 +392,42 @@ impl GuardConfigBuilder {
         self
     }
 
-    /// Store only the IP prefix (/24 or /48) in events. Default off.
-    pub fn minimize_event_ip(mut self, minimize: bool) -> Self {
-        self.minimize_event_ip = minimize;
+    /// Write a reduced copy of each event to the store: the IP's /24 (IPv4) or /48 (IPv6)
+    /// network instead of the address, no raw User-Agent (the browser and OS families stay in
+    /// [`ClientSummary`](crate::ClientSummary)) and no city. Default on. The
+    /// [`on_event`](crate::GuardBuilder::on_event) hook always gets the full event.
+    pub fn minimize_stored_events(mut self, minimize: bool) -> Self {
+        self.minimize_stored_events = minimize;
+        self
+    }
+
+    /// Keep the full IP, raw User-Agent and city in each session's
+    /// [`SessionOrigin`](crate::SessionOrigin). Default off: the origin holds only the IP's
+    /// /24 (IPv4) or /48 (IPv6) network and the [`ClientSummary`](crate::ClientSummary)
+    /// without city, which is enough for a "your devices" page.
+    pub fn keep_origin_client(mut self, keep: bool) -> Self {
+        self.keep_origin_client = keep;
         self
     }
 
     /// Shadow event dedup window. Default 10 minutes. Zero records every shadow event.
     pub fn shadow_dedup_window(mut self, window: Duration) -> Self {
         self.shadow_dedup_window = window;
+        self
+    }
+
+    /// Per-subject alert dedup window. Default zero (off).
+    ///
+    /// When set, the hook sees at most one enforced security-relevant event per subject and
+    /// kind per window, across processes through [`SessionStore::claim_event`] with
+    /// [`ClaimScope::Subject`]. Use it so an attacker hammering many sessions of one subject
+    /// pages its owner once instead of once per session. Every event is still logged and
+    /// stored; login, logout and step-up completion always reach the hook.
+    ///
+    /// [`SessionStore::claim_event`]: crate::SessionStore::claim_event
+    /// [`ClaimScope::Subject`]: crate::ClaimScope::Subject
+    pub fn alert_dedup_window(mut self, window: Duration) -> Self {
+        self.alert_dedup_window = window;
         self
     }
 
@@ -446,8 +492,10 @@ impl GuardConfigBuilder {
             ping_pong_window: bounded(self.ping_pong_window, "ping_pong_window")?,
             last_seen_write_interval: bounded(self.last_seen_write_interval, "last_seen_write_interval")?,
             event_retention: positive(self.event_retention, "event_retention")?,
-            minimize_event_ip: self.minimize_event_ip,
+            minimize_stored_events: self.minimize_stored_events,
+            keep_origin_client: self.keep_origin_client,
             shadow_dedup_window: bounded(self.shadow_dedup_window, "shadow_dedup_window")?,
+            alert_dedup_window: bounded(self.alert_dedup_window, "alert_dedup_window")?,
             max_header_len: self.max_header_len,
             token_prefix: self.token_prefix,
             orphan_reissue_window: self
@@ -491,9 +539,11 @@ mod tests {
         assert_eq!(c.checks(), &Checks::default());
         assert_eq!(c.thresholds(), Thresholds::default());
         assert_eq!(c.event_retention(), Duration::from_hours(90 * 24));
-        assert!(!c.minimize_event_ip());
+        assert!(c.minimize_stored_events());
+        assert!(!c.keep_origin_client());
         assert_eq!(c.trusted_proxies(), &[]);
         assert_eq!(c.orphan_reissue_window(), None);
+        assert_eq!(c.alert_dedup_window(), Duration::ZERO);
     }
 
     #[test]
@@ -512,11 +562,14 @@ mod tests {
             })
             .mode(Mode::Shadow)
             .step_up_policy(StepUpPolicy::Allow)
-            .minimize_event_ip(true)
+            .minimize_stored_events(false)
+            .keep_origin_client(true)
             .orphan_reissue_window(Duration::from_secs(3600))
+            .alert_dedup_window(Duration::from_mins(15))
             .build()
             .unwrap();
         assert_eq!(c.cookie().cookie_name(), "__Host-app");
+        assert_eq!(c.alert_dedup_window(), Duration::from_mins(15));
         assert_eq!(c.orphan_reissue_window(), Some(Duration::from_secs(3600)));
         assert_eq!(c.trusted_proxies().len(), 3);
         assert!(
@@ -537,7 +590,8 @@ mod tests {
         assert_eq!(c.tls_fingerprint_header(), Some("x-ja4"));
         assert_eq!(c.mode(), Mode::Shadow);
         assert_eq!(c.step_up_policy(), StepUpPolicy::Allow);
-        assert!(c.minimize_event_ip());
+        assert!(!c.minimize_stored_events());
+        assert!(c.keep_origin_client());
     }
 
     #[test]
@@ -581,6 +635,10 @@ mod tests {
             b().orphan_reissue_window(Duration::MAX).build().unwrap_err(),
             ConfigError::InvalidDuration("orphan_reissue_window")
         );
+        assert_eq!(
+            b().alert_dedup_window(Duration::MAX).build().unwrap_err(),
+            ConfigError::InvalidDuration("alert_dedup_window")
+        );
         assert!(matches!(
             b().tls_fingerprint_header("x ja4").build(),
             Err(ConfigError::InvalidHeaderName(_))
@@ -607,6 +665,7 @@ mod tests {
             .ping_pong_window(Duration::ZERO)
             .last_seen_write_interval(Duration::ZERO)
             .shadow_dedup_window(Duration::ZERO)
+            .alert_dedup_window(Duration::ZERO)
             .orphan_reissue_window(Duration::ZERO)
             .rotation(RotationConfig {
                 grace: Duration::ZERO,

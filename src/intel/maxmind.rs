@@ -6,19 +6,23 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use maxminddb::{PathElement, Reader};
+use serde::Deserialize;
 
-use super::{IpInfo, IpIntel};
+use super::{Anonymity, IpInfo, IpIntel};
 
-/// Which of the two databases an error is about.
+/// Which database an error is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MaxMindDatabase {
-    /// The City or Country database, used for the ISO country code.
+    /// The City or Country database, used for the ISO country code and, with a City edition,
+    /// the city.
     Country,
-    /// The ASN database, used for the autonomous system number.
+    /// The ASN database, used for the autonomous system number and organization name.
     Asn,
+    /// The Anonymous IP, Anonymous Plus or IP Risk database, used for the [`Anonymity`].
+    Anonymizer,
 }
 
 impl fmt::Display for MaxMindDatabase {
@@ -26,6 +30,7 @@ impl fmt::Display for MaxMindDatabase {
         f.write_str(match self {
             Self::Country => "country",
             Self::Asn => "ASN",
+            Self::Anonymizer => "anonymizer",
         })
     }
 }
@@ -64,11 +69,44 @@ pub enum MaxMindError {
     },
 }
 
-/// Country and ASN lookups from `MaxMind` databases (`GeoLite2-City` / `GeoLite2-Country` /
-/// `GeoIP2-*` for the country, `GeoLite2-ASN` for the network).
+/// Country, city, ASN, network name and anonymizer lookups from `MaxMind` databases
+/// (`GeoLite2-City` / `GeoLite2-Country` / `GeoIP2-*` for the country, and the city with a City
+/// edition; `GeoLite2-ASN` for the autonomous system number and organization name; and
+/// optionally `GeoIP2-Anonymous-IP`, `GeoIP-Anonymous-Plus` or `GeoIP2-IP-Risk` for VPNs,
+/// proxies and Tor, added with [`with_anonymizer`](Self::with_anonymizer)).
 ///
 /// Databases are read into memory once, so lookups on the request path never touch the disk
 /// and are lock-free. Unknown addresses and lookup errors yield empty fields.
+///
+/// # Anonymizers
+///
+/// The anonymizer databases are paid `GeoIP2` products; there is no `GeoLite2` edition. With
+/// one loaded, every lookup sets [`IpInfo::anonymity`], which feeds the
+/// [`TorOrProxyEntered`](crate::Check::TorOrProxyEntered) and
+/// [`AnonymizerEntered`](crate::Check::AnonymizerEntered) checks. The database's flags map to
+/// the most severe [`Anonymity`] that applies:
+///
+/// | Flag | Anonymity |
+/// |---|---|
+/// | `is_tor_exit_node` | [`TorExitNode`](Anonymity::TorExitNode) |
+/// | `is_public_proxy` | [`PublicProxy`](Anonymity::PublicProxy) |
+/// | `is_residential_proxy` | [`ResidentialProxy`](Anonymity::ResidentialProxy) |
+/// | `is_anonymous_vpn`, unless `anonymizer_confidence` is below 50 | [`Vpn`](Anonymity::Vpn) |
+/// | `is_hosting_provider` | [`HostingProvider`](Anonymity::HostingProvider) |
+/// | none of these, or an address the database does not list | [`Direct`](Anonymity::Direct) |
+///
+/// A failed lookup (e.g. an IPv6 address in an IPv4-only database) leaves the anonymity
+/// unknown, so it never fires a check. The IP Risk database's `ip_risk` score is not used: the
+/// guard scores what changed during a session rather than how risky an address is on its own.
+///
+/// ```no_run
+/// use session_guard::MaxMindIntel;
+///
+/// let intel = MaxMindIntel::open("/var/lib/GeoIP/GeoLite2-Country.mmdb", None::<&str>)?
+///     .with_anonymizer("/var/lib/GeoIP/GeoIP2-Anonymous-IP.mmdb")?;
+/// # let _ = intel;
+/// # Ok::<(), session_guard::MaxMindError>(())
+/// ```
 ///
 /// ```no_run
 /// use session_guard::{Guard, GuardConfig, MaxMindIntel, MemoryStore};
@@ -97,7 +135,12 @@ pub enum MaxMindError {
 ///
 /// A change is detected from each file's modification time and size, so it works on every kind
 /// of mount, including network file systems and Kubernetes volumes that deliver no file system
-/// events. A reload swaps both databases at once; in-flight lookups finish on the old ones.
+/// events. A reload swaps the country and ASN databases at once; in-flight lookups finish on the
+/// old ones. The anonymizer database is checked and reloaded on its own, so a failed update of
+/// one never holds back the other. [`reload`](Self::reload) and
+/// [`reload_from_bytes`](Self::reload_from_bytes) leave the anonymizer in place; swap it with
+/// [`reload_anonymizer`](Self::reload_anonymizer) or
+/// [`reload_anonymizer_from_bytes`](Self::reload_anonymizer_from_bytes).
 ///
 /// To reload a source the guard uses, wrap it in an `Arc`, pass a clone to
 /// [`GuardBuilder::ip_intel`](crate::GuardBuilder::ip_intel) and keep the other:
@@ -124,9 +167,17 @@ pub enum MaxMindError {
 /// ```
 pub struct MaxMindIntel {
     databases: ArcSwap<Databases>,
-    /// The files the current databases were read from; `None` when they came from bytes. The
-    /// lock also serializes reloads, so an older read never replaces a newer one.
-    files: Mutex<Option<Files>>,
+    anonymizer: ArcSwapOption<Reader<Vec<u8>>>,
+    /// The files the current databases were read from. The lock also serializes reloads, so an
+    /// older read never replaces a newer one.
+    files: Mutex<Watched>,
+}
+
+/// The files [`MaxMindIntel::reload_if_changed`] follows; `None` for databases from bytes.
+#[derive(Default)]
+struct Watched {
+    geo: Option<Files>,
+    anonymizer: Option<AnonymizerFile>,
 }
 
 /// The files behind the databases and their state just before they were read.
@@ -155,18 +206,35 @@ impl Files {
     }
 }
 
+/// The anonymizer database's file and its state just before it was read.
+struct AnonymizerFile {
+    path: PathBuf,
+    stamp: FileStamp,
+}
+
+impl AnonymizerFile {
+    /// Like [`Files::read`], for the anonymizer database.
+    fn read(path: PathBuf) -> Result<(Reader<Vec<u8>>, Self), MaxMindError> {
+        let database = MaxMindDatabase::Anonymizer;
+        let stamp = file_stamp(database, &path)?;
+        let bytes = std::fs::read(&path).map_err(io_error(database, &path))?;
+        Ok((reader(database, bytes)?, Self { path, stamp }))
+    }
+}
+
 fn stamp(country: &Path, asn: Option<&Path>) -> Result<Stamp, MaxMindError> {
-    let file = |database, path: &Path| {
-        let metadata = std::fs::metadata(path).map_err(io_error(database, path))?;
-        Ok(FileStamp {
-            modified: metadata.modified().ok(),
-            len: metadata.len(),
-        })
-    };
     Ok((
-        file(MaxMindDatabase::Country, country)?,
-        asn.map(|path| file(MaxMindDatabase::Asn, path)).transpose()?,
+        file_stamp(MaxMindDatabase::Country, country)?,
+        asn.map(|path| file_stamp(MaxMindDatabase::Asn, path)).transpose()?,
     ))
+}
+
+fn file_stamp(database: MaxMindDatabase, path: &Path) -> Result<FileStamp, MaxMindError> {
+    let metadata = std::fs::metadata(path).map_err(io_error(database, path))?;
+    Ok(FileStamp {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    })
 }
 
 fn io_error(database: MaxMindDatabase, path: &Path) -> impl FnOnce(std::io::Error) -> MaxMindError + '_ {
@@ -204,12 +272,19 @@ fn reader(database: MaxMindDatabase, bytes: Vec<u8>) -> Result<Reader<Vec<u8>>, 
         source: Box::new(source),
     })?;
     let kind = reader.metadata().database_type.to_ascii_lowercase();
-    let has_country = kind.contains("country") || kind.contains("city");
-    let has_asn = kind.contains("asn");
-    let fits = match database {
-        MaxMindDatabase::Country => has_country || !has_asn,
-        MaxMindDatabase::Asn => has_asn || !has_country,
-    };
+    // A database of a kind we do not recognize gets the benefit of the doubt in every slot.
+    let kinds = [
+        (
+            MaxMindDatabase::Country,
+            kind.contains("country") || kind.contains("city"),
+        ),
+        (MaxMindDatabase::Asn, kind.contains("asn")),
+        (
+            MaxMindDatabase::Anonymizer,
+            kind.contains("anonymous") || kind.contains("ip-risk"),
+        ),
+    ];
+    let fits = kinds.iter().any(|&(slot, is)| is && slot == database) || kinds.iter().all(|&(_, is)| !is);
     if !fits {
         return Err(MaxMindError::WrongDatabase {
             database,
@@ -233,7 +308,11 @@ impl MaxMindIntel {
         )?;
         Ok(Self {
             databases: ArcSwap::from_pointee(databases),
-            files: Mutex::new(Some(files)),
+            anonymizer: ArcSwapOption::empty(),
+            files: Mutex::new(Watched {
+                geo: Some(files),
+                anonymizer: None,
+            }),
         })
     }
 
@@ -245,13 +324,39 @@ impl MaxMindIntel {
     pub fn from_bytes(country_db: Vec<u8>, asn_db: Option<Vec<u8>>) -> Result<Self, MaxMindError> {
         Ok(Self {
             databases: ArcSwap::from_pointee(Databases::parse(country_db, asn_db)?),
-            files: Mutex::new(None),
+            anonymizer: ArcSwapOption::empty(),
+            files: Mutex::new(Watched::default()),
         })
     }
 
-    /// Replaces both databases with freshly read files, which later
+    /// Adds an Anonymous IP, Anonymous Plus or IP Risk database, so lookups also report the
+    /// [`Anonymity`] of the network; see [Anonymizers](Self#anonymizers).
+    /// [`reload_if_changed`](Self::reload_if_changed) follows its file too.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be read, is not a valid MMDB file, or is the wrong kind of
+    /// database.
+    pub fn with_anonymizer(self, anonymizer_db: impl AsRef<Path>) -> Result<Self, MaxMindError> {
+        self.reload_anonymizer(anonymizer_db)?;
+        Ok(self)
+    }
+
+    /// Like [`with_anonymizer`](Self::with_anonymizer), from database contents already in
+    /// memory.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the bytes are not a valid MMDB file or the wrong kind of database.
+    pub fn with_anonymizer_bytes(self, anonymizer_db: Vec<u8>) -> Result<Self, MaxMindError> {
+        self.reload_anonymizer_from_bytes(anonymizer_db)?;
+        Ok(self)
+    }
+
+    /// Replaces the country and ASN databases with freshly read files, which later
     /// [`reload_if_changed`](Self::reload_if_changed) checks follow. In-flight lookups finish on
-    /// the old databases. On error the current databases and files stay in place.
+    /// the old databases. On error the current databases and files stay in place. The
+    /// anonymizer database is left as it is.
     ///
     /// # Errors
     ///
@@ -263,13 +368,13 @@ impl MaxMindIntel {
             asn_db.map(|path| path.as_ref().to_owned()),
         )?;
         self.databases.store(Arc::new(databases));
-        *files = Some(read);
+        files.geo = Some(read);
         Ok(())
     }
 
     /// Like [`reload`](Self::reload), from database contents already in memory. The databases
     /// no longer come from files, so [`reload_if_changed`](Self::reload_if_changed) stops
-    /// checking them.
+    /// checking them (but still checks the anonymizer database's file, if it has one).
     ///
     /// # Errors
     ///
@@ -277,7 +382,37 @@ impl MaxMindIntel {
     pub fn reload_from_bytes(&self, country_db: Vec<u8>, asn_db: Option<Vec<u8>>) -> Result<(), MaxMindError> {
         let mut files = self.lock_files();
         self.databases.store(Arc::new(Databases::parse(country_db, asn_db)?));
-        *files = None;
+        files.geo = None;
+        Ok(())
+    }
+
+    /// Replaces (or adds) the anonymizer database with a freshly read file, which later
+    /// [`reload_if_changed`](Self::reload_if_changed) checks follow. On error the current
+    /// anonymizer database and file stay in place.
+    ///
+    /// # Errors
+    ///
+    /// As for [`with_anonymizer`](Self::with_anonymizer).
+    pub fn reload_anonymizer(&self, anonymizer_db: impl AsRef<Path>) -> Result<(), MaxMindError> {
+        let mut files = self.lock_files();
+        let (reader, read) = AnonymizerFile::read(anonymizer_db.as_ref().to_owned())?;
+        self.anonymizer.store(Some(Arc::new(reader)));
+        files.anonymizer = Some(read);
+        Ok(())
+    }
+
+    /// Like [`reload_anonymizer`](Self::reload_anonymizer), from database contents already in
+    /// memory. [`reload_if_changed`](Self::reload_if_changed) then stops checking the
+    /// anonymizer database.
+    ///
+    /// # Errors
+    ///
+    /// As for [`with_anonymizer_bytes`](Self::with_anonymizer_bytes).
+    pub fn reload_anonymizer_from_bytes(&self, anonymizer_db: Vec<u8>) -> Result<(), MaxMindError> {
+        let mut files = self.lock_files();
+        let reader = reader(MaxMindDatabase::Anonymizer, anonymizer_db)?;
+        self.anonymizer.store(Some(Arc::new(reader)));
+        files.anonymizer = None;
         Ok(())
     }
 
@@ -285,10 +420,11 @@ impl MaxMindIntel {
     /// whether it did.
     ///
     /// The files are those given to [`open`](Self::open) or the latest
-    /// [`reload`](Self::reload). Each is compared by modification time and size, which costs a
-    /// `stat` per file; unchanged files are not read. Databases created with
-    /// [`from_bytes`](Self::from_bytes) or [`reload_from_bytes`](Self::reload_from_bytes) have no
-    /// files and always return `Ok(false)`.
+    /// [`reload`](Self::reload), and to [`with_anonymizer`](Self::with_anonymizer) or the latest
+    /// [`reload_anonymizer`](Self::reload_anonymizer). Each is compared by modification time and
+    /// size, which costs a `stat` per file; unchanged files are not read. The country and ASN
+    /// databases are reloaded together, the anonymizer database on its own. Databases from
+    /// bytes have no files and are never reloaded here.
     ///
     /// This blocks while it reads and parses changed files (tens of megabytes for a City
     /// database), so call it off the async runtime, or use [`spawn_reload`](Self::spawn_reload).
@@ -296,10 +432,17 @@ impl MaxMindIntel {
     /// # Errors
     ///
     /// As for [`open`](Self::open), for example when a file is missing, or only partly written
-    /// by a tool that does not replace it atomically. The current databases then stay in place
-    /// and the next call tries again.
+    /// by a tool that does not replace it atomically. The databases that failed then stay in
+    /// place and the next call tries again; the others are still reloaded. With failures on both
+    /// sides, the country or ASN error is returned.
     pub fn reload_if_changed(&self) -> Result<bool, MaxMindError> {
         let mut files = self.lock_files();
+        let geo = self.reload_geo_if_changed(&mut files.geo);
+        let anonymizer = self.reload_anonymizer_if_changed(&mut files.anonymizer);
+        Ok(geo? | anonymizer?)
+    }
+
+    fn reload_geo_if_changed(&self, files: &mut Option<Files>) -> Result<bool, MaxMindError> {
         let Some(current) = files.as_ref() else {
             return Ok(false);
         };
@@ -309,6 +452,19 @@ impl MaxMindIntel {
         let (databases, read) = Files::read(current.country.clone(), current.asn.clone())?;
         self.databases.store(Arc::new(databases));
         *files = Some(read);
+        Ok(true)
+    }
+
+    fn reload_anonymizer_if_changed(&self, file: &mut Option<AnonymizerFile>) -> Result<bool, MaxMindError> {
+        let Some(current) = file.as_ref() else {
+            return Ok(false);
+        };
+        if file_stamp(MaxMindDatabase::Anonymizer, &current.path)? == current.stamp {
+            return Ok(false);
+        }
+        let (reader, read) = AnonymizerFile::read(current.path.clone())?;
+        self.anonymizer.store(Some(Arc::new(reader)));
+        *file = Some(read);
         Ok(true)
     }
 
@@ -339,6 +495,11 @@ impl MaxMindIntel {
                         tracing::info!(
                             country_built = databases.country.metadata().build_epoch,
                             asn_built = databases.asn.as_ref().map(|reader| reader.metadata().build_epoch),
+                            anonymizer_built = intel
+                                .anonymizer
+                                .load()
+                                .as_ref()
+                                .map(|reader| reader.metadata().build_epoch),
                             "reloaded MaxMind databases"
                         );
                     }
@@ -352,7 +513,7 @@ impl MaxMindIntel {
 
     /// A reload that panicked left the previous state intact (it is only replaced on success),
     /// so a poisoned lock is safe to reuse.
-    fn lock_files(&self) -> MutexGuard<'_, Option<Files>> {
+    fn lock_files(&self) -> MutexGuard<'_, Watched> {
         self.files.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -360,36 +521,94 @@ impl MaxMindIntel {
 const COUNTRY: [PathElement<'static>; 2] = [PathElement::Key("country"), PathElement::Key("iso_code")];
 const REGISTERED_COUNTRY: [PathElement<'static>; 2] =
     [PathElement::Key("registered_country"), PathElement::Key("iso_code")];
+const CITY: [PathElement<'static>; 3] = [
+    PathElement::Key("city"),
+    PathElement::Key("names"),
+    PathElement::Key("en"),
+];
 const ASN: [PathElement<'static>; 1] = [PathElement::Key("autonomous_system_number")];
+const NETWORK: [PathElement<'static>; 1] = [PathElement::Key("autonomous_system_organization")];
+
+/// Below this `anonymizer_confidence`, `is_anonymous_vpn` is ignored.
+const VPN_CONFIDENCE: u16 = 50;
+
+/// The fields shared by the Anonymous IP, Anonymous Plus and IP Risk databases. Flags are only
+/// present when true.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+#[allow(clippy::struct_excessive_bools, reason = "mirrors the database's record")]
+struct AnonymizerRecord {
+    is_anonymous_vpn: bool,
+    is_hosting_provider: bool,
+    is_public_proxy: bool,
+    is_residential_proxy: bool,
+    is_tor_exit_node: bool,
+    anonymizer_confidence: Option<u16>,
+}
+
+impl AnonymizerRecord {
+    fn anonymity(&self) -> Anonymity {
+        if self.is_tor_exit_node {
+            Anonymity::TorExitNode
+        } else if self.is_public_proxy {
+            Anonymity::PublicProxy
+        } else if self.is_residential_proxy {
+            Anonymity::ResidentialProxy
+        } else if self.is_anonymous_vpn && self.anonymizer_confidence.is_none_or(|c| c >= VPN_CONFIDENCE) {
+            Anonymity::Vpn
+        } else if self.is_hosting_provider {
+            Anonymity::HostingProvider
+        } else {
+            Anonymity::Direct
+        }
+    }
+}
 
 impl IpIntel for MaxMindIntel {
     fn lookup(&self, ip: IpAddr) -> IpInfo {
         let ip = crate::client::canonical_ip(ip);
         let databases = self.databases.load();
-        let country = databases.country.lookup(ip).ok().and_then(|found| {
+        let geo = databases.country.lookup(ip).ok();
+        let country = geo.as_ref().and_then(|found| {
             [&COUNTRY[..], &REGISTERED_COUNTRY[..]]
                 .into_iter()
                 .find_map(|path| found.decode_path::<&str>(path).ok().flatten())
                 .map(str::to_owned)
         });
-        let asn = databases
-            .asn
+        // Country editions have no `city`, so this is only found in City editions.
+        let city = geo.and_then(|found| found.decode_path::<String>(&CITY).ok().flatten());
+        let system = databases.asn.as_ref().and_then(|reader| reader.lookup(ip).ok());
+        let asn = system
             .as_ref()
-            .and_then(|reader| reader.lookup(ip).ok())
             .and_then(|found| found.decode_path::<u32>(&ASN).ok().flatten());
-        IpInfo::new(country, asn)
+        let network = system.and_then(|found| found.decode_path::<String>(&NETWORK).ok().flatten());
+        // An address the database does not list is not known to be an anonymizer.
+        let anonymity = self.anonymizer.load().as_ref().and_then(|reader| {
+            let found = reader.lookup(ip).ok()?.decode::<AnonymizerRecord>().ok()?;
+            Some(found.map_or(Anonymity::Direct, |record| record.anonymity()))
+        });
+        IpInfo {
+            anonymity,
+            city,
+            network,
+            ..IpInfo::new(country, asn)
+        }
     }
 }
 
 impl fmt::Debug for MaxMindIntel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let databases = self.databases.load();
+        let anonymizer = self.anonymizer.load();
         let files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
+        let geo = files.geo.as_ref();
         f.debug_struct("MaxMindIntel")
             .field("country", &databases.country.metadata().database_type)
             .field("asn", &databases.asn.as_ref().map(|r| &r.metadata().database_type))
-            .field("country_file", &files.as_ref().map(|files| &files.country))
-            .field("asn_file", &files.as_ref().and_then(|files| files.asn.as_ref()))
+            .field("anonymizer", &anonymizer.as_ref().map(|r| &r.metadata().database_type))
+            .field("country_file", &geo.map(|files| &files.country))
+            .field("asn_file", &geo.and_then(|files| files.asn.as_ref()))
+            .field("anonymizer_file", &files.anonymizer.as_ref().map(|file| &file.path))
             .finish()
     }
 }
