@@ -42,7 +42,7 @@ jobs:
       - run: cargo clippy --all-targets --no-default-features -- -D warnings
       # The fuzz crate is outside the workspace and only fuzzed weekly.
       - name: Check fuzz targets
-        run: cargo check --manifest-path fuzz/Cargo.toml --locked
+        run: cargo check --manifest-path fuzz/Cargo.toml
 
   doc:
     name: rustdoc
