@@ -134,8 +134,13 @@ impl<St: SessionStore, S: Subject> GuardBuilder<St, S> {
         self
     }
 
-    /// Called synchronously for every recorded event, after it is stored. Keep it fast; a panic
-    /// in the hook is caught and logged.
+    /// Called synchronously once per state change, in the process that made the change, after
+    /// the event is stored. When concurrent requests race, only the one whose change took
+    /// effect reports it; the exception is `step_up_required`, which two requests that both
+    /// trip it may each report. Keep it fast; a panic in the hook is caught and logged.
+    ///
+    /// Delivery is at most once. There is no outbox, so a crash between the change and the
+    /// hook loses the event.
     pub fn on_event(mut self, hook: impl Fn(&SessionEvent) + Send + Sync + 'static) -> Self {
         self.hook = Some(Arc::new(hook));
         self
@@ -343,23 +348,23 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         let step_up = decision == Decision::StepUp;
 
         if decision == Decision::Revoke || (step_up && config.step_up_policy == StepUpPolicy::Revoke) {
-            self.emit(
-                session.id,
-                &session.subject,
-                EventKind::RiskRevoked,
-                !shadow,
-                ctx,
-                Some(&assessment),
-            )
-            .await;
+            self.revoke_for_risk(session, ctx, &assessment, !shadow).await?;
             if !shadow {
-                inner.store.delete_session(session.id).await?;
                 return Ok(Outcome::Rejected(Rejection::Revoked));
             }
         } else if session.step_up_required && !shadow {
             return Ok(Outcome::Rejected(Rejection::StepUpRequired));
         } else if step_up {
             let enforced = config.step_up_policy == StepUpPolicy::Require && !shadow;
+            if enforced {
+                let mut update = SessionUpdate::touch(session.id, now);
+                update.step_up_required = Some(true);
+                update.mark_used =
+                    (state == TokenState::Current && lookup.token.first_used_at.is_none()).then_some(hash);
+                inner.store.apply(&update).await?;
+            }
+            // `apply` does not say whether the flag was already set, so racing requests each
+            // report it.
             self.emit(
                 session.id,
                 &session.subject,
@@ -370,11 +375,6 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             )
             .await;
             if enforced {
-                let mut update = SessionUpdate::touch(session.id, now);
-                update.step_up_required = Some(true);
-                update.mark_used =
-                    (state == TokenState::Current && lookup.token.first_used_at.is_none()).then_some(hash);
-                inner.store.apply(&update).await?;
                 return Ok(Outcome::Rejected(Rejection::StepUpRequired));
             }
         }
@@ -475,24 +475,38 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         update.baseline = Some(Baseline::new(self.fingerprint(ctx)));
         update.step_up_required = Some(false);
         update.authenticated_at = Some(now);
-        update.rotation = Some(Rotation {
+        // With the current token, only one of several concurrent submits replaces it.
+        let supersede = match resolved.state {
+            TokenState::Current => Supersede::Exact(resolved.hash),
+            _ => Supersede::Current,
+        };
+        let rotation = Rotation {
             new_token: token.hash(),
-            supersede: Supersede::Current,
+            supersede,
             prune_superseded_before: now - inner.config.reuse_detection,
-        });
-        if !inner.store.apply(&update).await? {
-            // The session vanished between lookup and update.
-            return Ok(StepUpOutcome::Rejected(Rejection::Revoked));
+        };
+        update.rotation = Some(rotation);
+        if inner.store.apply(&update).await? {
+            self.emit(
+                session.id,
+                &session.subject,
+                EventKind::StepUpCompleted,
+                true,
+                ctx,
+                None,
+            )
+            .await;
+        } else {
+            // A concurrent submit won and reports it; this one still gets a token. Or the
+            // session vanished between lookup and update.
+            update.rotation = Some(Rotation {
+                supersede: Supersede::Current,
+                ..rotation
+            });
+            if !inner.store.apply(&update).await? {
+                return Ok(StepUpOutcome::Rejected(Rejection::Revoked));
+            }
         }
-        self.emit(
-            session.id,
-            &session.subject,
-            EventKind::StepUpCompleted,
-            true,
-            ctx,
-            None,
-        )
-        .await;
         Ok(StepUpOutcome::Completed(self.issue(&token, session.expires_at)))
     }
 
@@ -752,10 +766,35 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         }))
     }
 
-    async fn revoke_for_reuse(&self, session: &SessionRecord, ctx: &ClientContext) -> Result<(), GuardError> {
-        self.inner.store.delete_session(session.id).await?;
-        self.emit(session.id, &session.subject, EventKind::TokenReuse, true, ctx, None)
+    /// Deletes the session when `enforced`. Only the request that deleted it reports the
+    /// revocation; an unenforced one is reported once per dedup window.
+    async fn revoke_for_risk(
+        &self,
+        session: &SessionRecord,
+        ctx: &ClientContext,
+        assessment: &crate::risk::Assessment,
+        enforced: bool,
+    ) -> Result<(), GuardError> {
+        if !enforced || self.inner.store.delete_session(session.id).await? {
+            self.emit(
+                session.id,
+                &session.subject,
+                EventKind::RiskRevoked,
+                enforced,
+                ctx,
+                Some(assessment),
+            )
             .await;
+        }
+        Ok(())
+    }
+
+    /// Deletes the session. Only the request that deleted it reports the reuse.
+    async fn revoke_for_reuse(&self, session: &SessionRecord, ctx: &ClientContext) -> Result<(), GuardError> {
+        if self.inner.store.delete_session(session.id).await? {
+            self.emit(session.id, &session.subject, EventKind::TokenReuse, true, ctx, None)
+                .await;
+        }
         Ok(())
     }
 

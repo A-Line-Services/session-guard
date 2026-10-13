@@ -654,6 +654,37 @@ async fn parallel_requests_at_rotation_do_not_trip_reuse<St: SessionStore>(store
     env.assert_me(&old, user).await;
 }
 
+/// Scenario 11b: Parallel requests that trip a revocation report it once.
+async fn parallel_revocations_report_once<St: SessionStore>(store: St) {
+    let env = spawn(store, config()).await;
+    let user = Uuid::new_v4();
+    let cookie = env.login(user).await;
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..16 {
+        tasks.spawn(send(mac(env.get("/me", &cookie))));
+    }
+    while let Some(resp) = tasks.join_next().await {
+        assert_eq!(resp.unwrap().status, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(env.events_of(EventKind::RiskRevoked).len(), 1);
+
+    let stolen = env.login(user).await;
+    env.advance(Duration::from_mins(11));
+    let victim = env.assert_me(&stolen, user).await.new_cookie().unwrap();
+    env.advance(Duration::from_secs(60));
+    env.assert_me(&victim, user).await;
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..16 {
+        tasks.spawn(send(env.get("/me", &stolen)));
+    }
+    while let Some(resp) = tasks.join_next().await {
+        assert_eq!(resp.unwrap().status, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(env.events_of(EventKind::TokenReuse).len(), 1);
+}
+
 /// Scenario 12: Logging in while presenting an old session cookie revokes that session.
 async fn login_with_old_cookie_revokes_it<St: SessionStore>(store: St) {
     let env = spawn(store, config()).await;
@@ -733,6 +764,7 @@ scenarios!(
     absolute_lifetime_expires_session,
     shadow_mode_records_but_allows,
     parallel_requests_at_rotation_do_not_trip_reuse,
+    parallel_revocations_report_once,
     login_with_old_cookie_revokes_it,
     sensitive_group_requires_recent_auth,
 );

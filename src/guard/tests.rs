@@ -1083,6 +1083,193 @@ async fn concurrent_requests_with_one_token_rotate_once() {
     assert_eq!(rotated, 1);
 }
 
+// --- losing a race ---
+
+/// What a concurrent request does to the session between this request's lookup and its write.
+#[derive(Clone, Copy)]
+enum Race {
+    /// Deletes the session.
+    Delete,
+    /// Completes a step-up: rotates the token and clears the flag.
+    StepUp,
+}
+
+/// A [`MemoryStore`] that lets a concurrent request win once, right after `find_by_token`.
+#[derive(Default)]
+struct RacingStore {
+    inner: MemoryStore,
+    race: Mutex<Option<Race>>,
+}
+
+impl RacingStore {
+    fn arm(&self, race: Race) {
+        *self.race.lock().unwrap() = Some(race);
+    }
+}
+
+impl SessionStore for RacingStore {
+    async fn insert_session(&self, session: &SessionRecord, token: &TokenHash) -> Result<(), crate::StoreError> {
+        self.inner.insert_session(session, token).await
+    }
+
+    async fn find_by_token(&self, token: &TokenHash) -> Result<Option<crate::store::TokenLookup>, crate::StoreError> {
+        let found = self.inner.find_by_token(token).await?;
+        let race = self.race.lock().unwrap().take();
+        if let (Some(race), Some(lookup)) = (race, &found) {
+            let id = lookup.session.id;
+            match race {
+                Race::Delete => {
+                    self.inner.delete_session(id).await?;
+                }
+                Race::StepUp => {
+                    let now = lookup.session.last_seen_at;
+                    let mut update = SessionUpdate::touch(id, now);
+                    update.step_up_required = Some(false);
+                    update.rotation = Some(Rotation {
+                        new_token: SessionToken::generate().unwrap().hash(),
+                        supersede: Supersede::Current,
+                        prune_superseded_before: now - chrono::TimeDelta::days(1),
+                    });
+                    self.inner.apply(&update).await?;
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    async fn apply(&self, update: &SessionUpdate) -> Result<bool, crate::StoreError> {
+        self.inner.apply(update).await
+    }
+
+    async fn delete_session(&self, session_id: Uuid) -> Result<bool, crate::StoreError> {
+        self.inner.delete_session(session_id).await
+    }
+
+    async fn delete_subject_sessions(&self, subject: &str) -> Result<u64, crate::StoreError> {
+        self.inner.delete_subject_sessions(subject).await
+    }
+
+    async fn list_subject_sessions(&self, subject: &str) -> Result<Vec<SessionRecord>, crate::StoreError> {
+        self.inner.list_subject_sessions(subject).await
+    }
+
+    async fn delete_expired(&self, now: DateTime<Utc>, idle_cutoff: DateTime<Utc>) -> Result<u64, crate::StoreError> {
+        self.inner.delete_expired(now, idle_cutoff).await
+    }
+
+    async fn record_event(&self, event: &SessionEvent) -> Result<(), crate::StoreError> {
+        self.inner.record_event(event).await
+    }
+
+    async fn delete_events_before(&self, cutoff: DateTime<Utc>) -> Result<u64, crate::StoreError> {
+        self.inner.delete_events_before(cutoff).await
+    }
+}
+
+struct Racing {
+    guard: Guard<Arc<RacingStore>>,
+    store: Arc<RacingStore>,
+    clock: ManualClock,
+    events: Arc<Mutex<Vec<SessionEvent>>>,
+}
+
+impl Racing {
+    fn count(&self, kind: EventKind) -> usize {
+        self.events.lock().unwrap().iter().filter(|e| e.kind == kind).count()
+    }
+}
+
+fn racing() -> Racing {
+    let store = Arc::new(RacingStore::default());
+    let clock = ManualClock::new(start());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let guard = Guard::builder(Arc::clone(&store), GuardConfig::default())
+        .ip_intel(intel)
+        .clock(clock.clone())
+        .on_event(move |e| sink.lock().unwrap().push(e.clone()))
+        .build();
+    Racing {
+        guard,
+        store,
+        clock,
+        events,
+    }
+}
+
+#[tokio::test]
+async fn risk_revoke_lost_to_a_concurrent_delete_is_not_reported() {
+    let r = racing();
+    let t0 = r.guard.login(&Uuid::new_v4(), &home(), None).await.unwrap().token;
+    r.store.arm(Race::Delete);
+    assert_eq!(
+        rejected(r.guard.authenticate(t0.expose(), &attacker()).await.unwrap()),
+        Rejection::Revoked
+    );
+    assert_eq!(r.count(EventKind::RiskRevoked), 0);
+}
+
+/// A session whose first token was replayed after its successor was used.
+async fn reused(r: &Racing) -> String {
+    let t0 = r.guard.login(&Uuid::new_v4(), &home(), None).await.unwrap().token;
+    r.clock.advance(mins(11));
+    let t1 = authenticated(r.guard.authenticate(t0.expose(), &home()).await.unwrap())
+        .rotated
+        .unwrap();
+    authenticated(r.guard.authenticate(t1.expose(), &home()).await.unwrap());
+    r.clock.advance(mins(1));
+    t0.expose().to_owned()
+}
+
+#[tokio::test]
+async fn reuse_lost_to_a_concurrent_delete_is_not_reported() {
+    let r = racing();
+    let t0 = reused(&r).await;
+    r.store.arm(Race::Delete);
+    assert_eq!(
+        rejected(r.guard.authenticate(&t0, &home()).await.unwrap()),
+        Rejection::Revoked
+    );
+
+    let user = Uuid::new_v4();
+    let t0 = reused(&r).await;
+    r.store.arm(Race::Delete);
+    assert!(matches!(
+        r.guard.complete_step_up(&t0, &home(), &user).await.unwrap(),
+        StepUpOutcome::Rejected(Rejection::Revoked)
+    ));
+    assert_eq!(r.count(EventKind::TokenReuse), 0);
+}
+
+#[tokio::test]
+async fn step_up_completed_by_a_concurrent_request_is_reported_once() {
+    let r = racing();
+    let user = Uuid::new_v4();
+    let t0 = r.guard.login(&user, &home(), None).await.unwrap().token;
+    r.clock.advance(mins(1));
+    assert_eq!(
+        rejected(r.guard.authenticate(t0.expose(), &abroad()).await.unwrap()),
+        Rejection::StepUpRequired
+    );
+    assert_eq!(r.count(EventKind::StepUpRequired), 1);
+
+    // A double submit: the other request completed the step-up first. This one still gets a
+    // working token.
+    r.store.arm(Race::StepUp);
+    let StepUpOutcome::Completed(t1) = r.guard.complete_step_up(t0.expose(), &abroad(), &user).await.unwrap() else {
+        panic!("step-up should complete");
+    };
+    authenticated(r.guard.authenticate(t1.expose(), &abroad()).await.unwrap());
+    assert_eq!(r.count(EventKind::StepUpCompleted), 0);
+
+    r.store.arm(Race::Delete);
+    assert!(matches!(
+        r.guard.complete_step_up(t1.expose(), &abroad(), &user).await.unwrap(),
+        StepUpOutcome::Rejected(Rejection::Revoked)
+    ));
+    assert_eq!(r.count(EventKind::StepUpCompleted), 0);
+}
+
 // --- token prefix ---
 
 fn prefixed() -> Harness {

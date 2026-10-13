@@ -124,6 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `Guard::new` uses `GuardConfig::default()`. Use `Guard::builder(store, config)` to change the config, set a custom subject type (`.subject::<T>()`), an `IpIntel` source, an event hook (`.on_event`) or a clock.
+The event hook is called once per state change, in the process that made the change, after the event is stored. Of several racing requests only the one whose change took effect reports it, except `step_up_required`, which each racing request may report. Delivery is at most once: there is no outbox, so a crash between the change and the hook loses the event.
 `PgStore::migrated` runs the embedded migrations and is safe to call from many processes. To run them in your own pipeline, use `PgStore::migrator()` and `PgStore::new(pool)` instead.
 Without `ConnectInfo<SocketAddr>` the layer fails closed with a 500.
 
