@@ -8,7 +8,7 @@ session-guard manages sessions only. The app owns login, password verification, 
 
 ```toml
 [dependencies]
-session-guard = { version = "0.1", features = ["axum", "postgres"] }
+session-guard = { version = "0.2", features = ["axum", "postgres"] }
 # other features: "valkey", "maxmind", "metrics", "aide" (OpenAPI via aide and rovo), "tokio", "testing"
 ```
 
