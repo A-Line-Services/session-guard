@@ -28,7 +28,7 @@ pub use valkey::ValkeyStore;
 
 use crate::{
     error::StoreError,
-    event::{EventKind, SessionEvent},
+    event::{EventKind, SessionEvent, SessionOrigin},
     fingerprint::Baseline,
     token::TokenHash,
 };
@@ -53,6 +53,8 @@ pub struct SessionRecord {
     pub step_up_required: bool,
     /// What the session's client looks like.
     pub baseline: Baseline,
+    /// Where the session started. `None` for sessions created before 0.2.
+    pub origin: Option<SessionOrigin>,
 }
 
 /// A stored token.

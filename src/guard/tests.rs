@@ -974,6 +974,42 @@ async fn list_sessions_describes_devices_and_skips_expired() {
     assert_eq!(list[0].browser.as_deref(), Some("Chrome"));
     assert_eq!(list[0].os.as_deref(), Some("Windows"));
     assert_eq!(list[0].country.as_deref(), Some("US"));
+    let origin = list[0].origin.as_ref().expect("login records the origin");
+    assert_eq!(origin.at, start() + chrono::TimeDelta::minutes(61));
+    assert_eq!(origin.ip_prefix, ip("203.0.113.0"));
+}
+
+#[tokio::test]
+async fn login_records_a_minimised_origin_by_default() {
+    let h = harness();
+    let user = Uuid::new_v4();
+    login(&h, user).await;
+    h.advance(mins(5));
+    let origin = h.guard.list_sessions(&user).await.unwrap()[0].origin.clone().unwrap();
+    assert_eq!(origin.at, start());
+    assert_eq!(origin.ip_prefix, ip("203.0.113.0"));
+    assert_eq!(origin.ip, None);
+    assert_eq!(origin.user_agent, None);
+    assert_eq!(origin.client.city, None, "the city would undo the masking");
+    assert_eq!(origin.client.country.as_deref(), Some("US"));
+    assert_eq!(origin.client.network.as_deref(), Some("Example Net"));
+    assert_eq!(origin.client.browser.as_deref(), Some("Chrome"));
+}
+
+#[tokio::test]
+async fn keep_origin_client_keeps_the_full_origin() {
+    let h = harness_with(GuardConfig::builder().keep_origin_client(true).build().unwrap());
+    let user = Uuid::new_v4();
+    let t0 = login(&h, user).await;
+    let origin = h.guard.peek(&t0).await.unwrap().unwrap().origin.unwrap();
+    assert_eq!(origin.ip_prefix, ip("203.0.113.0"));
+    assert_eq!(origin.ip, Some(ip("203.0.113.7")));
+    assert_eq!(origin.user_agent.as_deref(), Some(CHROME_WIN));
+    assert_eq!(origin.client.city.as_deref(), Some("Springfield"));
+    assert_eq!(
+        h.guard.list_sessions(&user).await.unwrap()[0].origin.as_ref(),
+        Some(&origin)
+    );
 }
 
 #[tokio::test]

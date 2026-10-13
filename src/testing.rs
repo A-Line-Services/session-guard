@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use crate::{
     checks::Check,
-    event::{ClientSummary, EventKind, SessionEvent},
+    event::{ClientSummary, EventKind, SessionEvent, SessionOrigin},
     fingerprint::{Baseline, Fingerprint},
     intel::Anonymity,
     store::{ClaimScope, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
@@ -47,6 +47,7 @@ macro_rules! store_conformance {
             insert_and_find,
             unknown_token_is_none,
             records_round_trip,
+            session_without_origin,
             exact_rotation_happens_once,
             concurrent_rotation_has_one_winner,
             rotation_if_issued_before,
@@ -109,6 +110,17 @@ pub fn sample_session_for(subject: &str, now: DateTime<Utc>) -> SessionRecord {
         baseline: Baseline::new(Fingerprint {
             ip_prefix: "203.0.113.0/24".into(),
             ..Fingerprint::default()
+        }),
+        origin: Some(SessionOrigin {
+            at: now,
+            ip_prefix: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 0)),
+            ip: None,
+            user_agent: None,
+            client: ClientSummary {
+                country: Some("BE".into()),
+                browser: Some("Firefox".into()),
+                ..ClientSummary::default()
+            },
         }),
     }
 }
@@ -184,10 +196,49 @@ pub async fn records_round_trip<St: SessionStore>(store: St) {
         previous_ip_prefix: Some("198.51.100.0/24".into()),
         ip_changed_at: Some(now - secs(60)),
     };
+    session.origin = Some(SessionOrigin {
+        at: now - secs(30),
+        ip_prefix: "2001:db8:1::".parse().unwrap(),
+        ip: Some("2001:db8:1::7".parse().unwrap()),
+        user_agent: Some("Mozilla/5.0 🦀".into()),
+        client: ClientSummary {
+            country: Some("BE".into()),
+            city: Some("Zürich".into()),
+            asn: Some(64_496),
+            network: Some("Example Net".into()),
+            anonymity: Some(Anonymity::Vpn),
+            browser: Some("Firefox".into()),
+            os: Some("Linux".into()),
+        },
+    });
     let token = random_hash();
     store.insert_session(&session, &token).await.unwrap();
     let found = store.find_by_token(&token).await.unwrap().unwrap();
     assert_eq!(found.session, session);
+    assert_eq!(
+        store.list_subject_sessions(&session.subject).await.unwrap(),
+        vec![session]
+    );
+}
+
+/// A session without an origin (created before 0.2) is stored and read back as such.
+pub async fn session_without_origin<St: SessionStore>(store: St) {
+    let now = now_secs();
+    let session = SessionRecord {
+        origin: None,
+        ..sample_session(now)
+    };
+    let token = random_hash();
+    store.insert_session(&session, &token).await.unwrap();
+    let found = store.find_by_token(&token).await.unwrap().unwrap();
+    assert_eq!(found.session, session);
+    store
+        .apply(&SessionUpdate::touch(session.id, now + secs(1)))
+        .await
+        .unwrap();
+    let listed = store.list_subject_sessions(&session.subject).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].origin, None);
 }
 
 /// `Supersede::Exact` rotates only while that token is current.
@@ -430,6 +481,7 @@ pub async fn none_fields_are_preserved<St: SessionStore>(store: St) {
     assert_eq!(found.created_at, session.created_at);
     assert_eq!(found.expires_at, session.expires_at);
     assert_eq!(found.subject, session.subject);
+    assert_eq!(found.origin, session.origin);
 
     store
         .apply(&SessionUpdate {

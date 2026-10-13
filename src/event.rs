@@ -172,6 +172,33 @@ impl ClientSummary {
     }
 }
 
+/// Where a session started, recorded at login. The precise parts (`ip`, `user_agent`, the
+/// city) are kept only with
+/// [`keep_origin_client`](crate::GuardConfigBuilder::keep_origin_client).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionOrigin {
+    /// Login time.
+    pub at: DateTime<Utc>,
+    /// The client IP's /24 (IPv4) or /48 (IPv6) network address.
+    pub ip_prefix: IpAddr,
+    /// Client IP. Only with `keep_origin_client`.
+    #[serde(default)]
+    pub ip: Option<IpAddr>,
+    /// Client User-Agent, truncated to the header cap. Only with `keep_origin_client`.
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    /// Where the login came from and what sent it. No city unless `keep_origin_client`.
+    #[serde(default)]
+    pub client: ClientSummary,
+}
+
+/// Reduces an address to its /24 (IPv4) or /48 (IPv6) network address.
+pub(crate) fn mask_ip(ip: IpAddr) -> IpAddr {
+    let len = if ip.is_ipv4() { 24 } else { 48 };
+    ipnet::IpNet::new(ip, len).map_or(ip, |net| net.trunc().addr())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +228,39 @@ mod tests {
         };
         let json = serde_json::to_string(&all).unwrap();
         assert_eq!(serde_json::from_str::<ClientSummary>(&json).unwrap(), all);
+    }
+
+    #[test]
+    fn session_origin_reads_missing_fields_as_none() {
+        let origin: SessionOrigin =
+            serde_json::from_str(r#"{"at":"2026-03-01T12:00:00Z","ip_prefix":"203.0.113.0"}"#).unwrap();
+        assert_eq!(origin.ip_prefix, "203.0.113.0".parse::<IpAddr>().unwrap());
+        assert_eq!(origin.ip, None);
+        assert_eq!(origin.user_agent, None);
+        assert_eq!(origin.client, ClientSummary::default());
+        let full = SessionOrigin {
+            ip: Some("203.0.113.7".parse().unwrap()),
+            user_agent: Some("Firefox".into()),
+            client: ClientSummary {
+                city: Some("Ghent".into()),
+                ..ClientSummary::default()
+            },
+            ..origin
+        };
+        let json = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::from_str::<SessionOrigin>(&json).unwrap(), full);
+    }
+
+    #[test]
+    fn mask_ip_keeps_the_network() {
+        assert_eq!(
+            mask_ip("203.0.113.7".parse().unwrap()),
+            "203.0.113.0".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            mask_ip("2001:db8:1:2::7".parse().unwrap()),
+            "2001:db8:1::".parse::<IpAddr>().unwrap()
+        );
     }
 
     #[test]

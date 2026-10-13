@@ -489,18 +489,23 @@ Apply a different set per route with `guard.layer().with(Checks::strict())`.
 | `thresholds` | step-up 40, revoke 80 |
 | `alert_dedup_window` | off (hook alerts are not deduplicated per subject) |
 | `orphan_reissue_window` | off (orphans are reissued until `rotation.reuse_detection` prunes them; zero never reissues) |
+| `minimize_stored_events` | on (stored events keep the IP's /24 or /48, no raw User-Agent, no city) |
+| `keep_origin_client` | off (a session's origin keeps the IP's /24 or /48, no raw User-Agent, no city) |
 
 `grace` must be shorter than `interval`. `last_seen_write_interval` limits store writes on the hot path.
 Roll out in shadow mode first: watch the events, tune weights, then switch to `Mode::Enforce`.
 
 ## Privacy and GDPR
 
-Stored per session: the subject, timestamps, the token hashes and a fingerprint baseline (IP prefix, country, ASN, browser, OS, client hints, languages, TLS fingerprint).
+Stored per session: the subject, timestamps, the token hashes, a fingerprint baseline (IP prefix, country, ASN, browser, OS, client hints, languages, TLS fingerprint) and a `SessionOrigin` recorded at login (time, IP /24 or /48 network, `ClientSummary` without city).
+`keep_origin_client(true)` also keeps the origin's full IP, truncated User-Agent and city; leave it off unless you need them.
 Events carry the client IP, a truncated User-Agent and a `ClientSummary` (country, city, ASN, network name, anonymizer, browser, OS).
 The `on_event` hook always gets all of it, e.g. to email the subject where a sign-in came from.
 The stored copy is minimized by default: the IP is masked to /24 (IPv4) or /48 (IPv6), and the raw User-Agent and the city are left out. `minimize_stored_events(false)` stores the full event.
 Events are kept for 90 days (`event_retention`); `guard.purge_expired()` deletes expired sessions and old events and returns a `PurgeReport`. Call it periodically, or let `guard.spawn_purge(every)` (`tokio` feature) do it.
 You, as the controller, decide the legal basis, the retention you configure, and how data subjects' requests are handled (`list_sessions`, `revoke_all_for_subject`).
+
+`guard.list_sessions(&subject)` returns a `SessionInfo` per live session for a "your devices" page: timestamps, the current browser, OS and country, and `origin` (where the session started; `None` for sessions created before 0.2).
 
 ## MaxMind
 

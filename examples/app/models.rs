@@ -65,6 +65,10 @@ pub struct SessionView {
     pub os: Option<String>,
     /// Country, if an IP intelligence source is configured.
     pub country: Option<String>,
+    /// Network (/24 or /48) the session signed in from.
+    pub signed_in_from: Option<String>,
+    /// Country the session signed in from, if an IP intelligence source is configured.
+    pub signed_in_country: Option<String>,
 }
 
 impl SessionView {
@@ -78,6 +82,8 @@ impl SessionView {
             browser: info.browser,
             os: info.os,
             country: info.country,
+            signed_in_from: info.origin.as_ref().map(|o| o.ip_prefix.to_string()),
+            signed_in_country: info.origin.and_then(|o| o.client.country),
         }
     }
 }

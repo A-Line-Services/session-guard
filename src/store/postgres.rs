@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::{ClaimScope, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
 use crate::{
     error::StoreError,
-    event::{EventKind, SessionEvent},
+    event::{EventKind, SessionEvent, SessionOrigin},
     fingerprint::Baseline,
     token::TokenHash,
 };
@@ -202,6 +202,7 @@ fn decode_hash(bytes: &[u8]) -> Result<TokenHash, sqlx::Error> {
 
 fn session_from_row(row: &PgRow) -> Result<SessionRecord, sqlx::Error> {
     let Json(baseline): Json<Baseline> = row.try_get("baseline")?;
+    let origin: Option<Json<SessionOrigin>> = row.try_get("origin")?;
     Ok(SessionRecord {
         id: row.try_get("id")?,
         subject: row.try_get("subject")?,
@@ -211,6 +212,7 @@ fn session_from_row(row: &PgRow) -> Result<SessionRecord, sqlx::Error> {
         expires_at: row.try_get("expires_at")?,
         step_up_required: row.try_get("step_up_required")?,
         baseline,
+        origin: origin.map(|Json(origin)| origin),
     })
 }
 
@@ -233,8 +235,9 @@ impl SessionStore for PgStore {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO session_guard_sessions
-                 (id, subject, created_at, authenticated_at, last_seen_at, expires_at, step_up_required, baseline)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                 (id, subject, created_at, authenticated_at, last_seen_at, expires_at, step_up_required, baseline,
+                  origin)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(session.id)
         .bind(&session.subject)
@@ -244,6 +247,7 @@ impl SessionStore for PgStore {
         .bind(session.expires_at)
         .bind(session.step_up_required)
         .bind(Json(&session.baseline))
+        .bind(session.origin.as_ref().map(Json))
         .execute(&mut *tx)
         .await?;
         sqlx::query("INSERT INTO session_guard_tokens (hash, session_id, issued_at) VALUES ($1, $2, $3)")
@@ -259,7 +263,7 @@ impl SessionStore for PgStore {
     async fn find_by_token(&self, token: &TokenHash) -> Result<Option<TokenLookup>, StoreError> {
         let row = sqlx::query(
             "SELECT s.id, s.subject, s.created_at, s.authenticated_at, s.last_seen_at, s.expires_at,
-                    s.step_up_required, s.baseline,
+                    s.step_up_required, s.baseline, s.origin,
                     t.hash, t.issued_at, t.first_used_at, t.superseded_at,
                     EXISTS (
                         SELECT 1 FROM session_guard_tokens n
@@ -311,7 +315,7 @@ impl SessionStore for PgStore {
     async fn list_subject_sessions(&self, subject: &str) -> Result<Vec<SessionRecord>, StoreError> {
         let rows = sqlx::query(
             "SELECT s.id, s.subject, s.created_at, s.authenticated_at, s.last_seen_at, s.expires_at,
-                    s.step_up_required, s.baseline
+                    s.step_up_required, s.baseline, s.origin
              FROM session_guard_sessions s
              WHERE s.subject = $1",
         )

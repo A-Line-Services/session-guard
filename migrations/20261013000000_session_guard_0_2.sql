@@ -11,3 +11,6 @@ CREATE TABLE session_guard_subject_claims (
 );
 
 CREATE INDEX session_guard_subject_claims_claimed_at_idx ON session_guard_subject_claims (claimed_at);
+
+-- Where the session started; NULL for sessions created before 0.2.
+ALTER TABLE session_guard_sessions ADD COLUMN origin jsonb NULL;

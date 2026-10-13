@@ -84,6 +84,7 @@ pub struct GuardConfig {
     pub(crate) last_seen_write_interval: TimeDelta,
     pub(crate) event_retention: TimeDelta,
     pub(crate) minimize_stored_events: bool,
+    pub(crate) keep_origin_client: bool,
     pub(crate) shadow_dedup_window: TimeDelta,
     pub(crate) alert_dedup_window: TimeDelta,
     pub(crate) max_header_len: usize,
@@ -181,6 +182,12 @@ impl GuardConfig {
         self.minimize_stored_events
     }
 
+    /// Whether a session's origin keeps the full IP, User-Agent and city; see
+    /// [`GuardConfigBuilder::keep_origin_client`].
+    pub fn keep_origin_client(&self) -> bool {
+        self.keep_origin_client
+    }
+
     /// Window in which repeated shadow events for the same session and kind are dropped.
     pub fn shadow_dedup_window(&self) -> Duration {
         to_std(self.shadow_dedup_window)
@@ -230,6 +237,7 @@ pub struct GuardConfigBuilder {
     last_seen_write_interval: Duration,
     event_retention: Duration,
     minimize_stored_events: bool,
+    keep_origin_client: bool,
     shadow_dedup_window: Duration,
     alert_dedup_window: Duration,
     max_header_len: usize,
@@ -256,6 +264,7 @@ impl Default for GuardConfigBuilder {
             last_seen_write_interval: Duration::from_secs(MINUTE),
             event_retention: Duration::from_secs(90 * DAY),
             minimize_stored_events: true,
+            keep_origin_client: false,
             shadow_dedup_window: Duration::from_secs(10 * MINUTE),
             alert_dedup_window: Duration::ZERO,
             max_header_len: 512,
@@ -392,6 +401,15 @@ impl GuardConfigBuilder {
         self
     }
 
+    /// Keep the full IP, raw User-Agent and city in each session's
+    /// [`SessionOrigin`](crate::SessionOrigin). Default off: the origin holds only the IP's
+    /// /24 (IPv4) or /48 (IPv6) network and the [`ClientSummary`](crate::ClientSummary)
+    /// without city, which is enough for a "your devices" page.
+    pub fn keep_origin_client(mut self, keep: bool) -> Self {
+        self.keep_origin_client = keep;
+        self
+    }
+
     /// Shadow event dedup window. Default 10 minutes. Zero records every shadow event.
     pub fn shadow_dedup_window(mut self, window: Duration) -> Self {
         self.shadow_dedup_window = window;
@@ -475,6 +493,7 @@ impl GuardConfigBuilder {
             last_seen_write_interval: bounded(self.last_seen_write_interval, "last_seen_write_interval")?,
             event_retention: positive(self.event_retention, "event_retention")?,
             minimize_stored_events: self.minimize_stored_events,
+            keep_origin_client: self.keep_origin_client,
             shadow_dedup_window: bounded(self.shadow_dedup_window, "shadow_dedup_window")?,
             alert_dedup_window: bounded(self.alert_dedup_window, "alert_dedup_window")?,
             max_header_len: self.max_header_len,
@@ -521,6 +540,7 @@ mod tests {
         assert_eq!(c.thresholds(), Thresholds::default());
         assert_eq!(c.event_retention(), Duration::from_hours(90 * 24));
         assert!(c.minimize_stored_events());
+        assert!(!c.keep_origin_client());
         assert_eq!(c.trusted_proxies(), &[]);
         assert_eq!(c.orphan_reissue_window(), None);
         assert_eq!(c.alert_dedup_window(), Duration::ZERO);
@@ -543,6 +563,7 @@ mod tests {
             .mode(Mode::Shadow)
             .step_up_policy(StepUpPolicy::Allow)
             .minimize_stored_events(false)
+            .keep_origin_client(true)
             .orphan_reissue_window(Duration::from_secs(3600))
             .alert_dedup_window(Duration::from_mins(15))
             .build()
@@ -570,6 +591,7 @@ mod tests {
         assert_eq!(c.mode(), Mode::Shadow);
         assert_eq!(c.step_up_policy(), StepUpPolicy::Allow);
         assert!(!c.minimize_stored_events());
+        assert!(c.keep_origin_client());
     }
 
     #[test]

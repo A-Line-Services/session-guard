@@ -113,7 +113,7 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{GuardConfig, GuardConfigBuilder, Mode, RotationConfig, StepUpPolicy};
 pub use cookie::{CookieConfig, SameSite, find_cookie};
 pub use error::{ConfigError, GuardError, StoreError};
-pub use event::{ClientSummary, EventKind, SessionEvent};
+pub use event::{ClientSummary, EventKind, SessionEvent, SessionOrigin};
 pub use fingerprint::{Baseline, Fingerprint, ip_prefix};
 pub use guard::{
     AuthSession, Authenticated, Guard, GuardBuilder, IssuedToken, NewSession, Outcome, PurgeReport, Rejection,

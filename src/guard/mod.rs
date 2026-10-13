@@ -31,7 +31,7 @@ use crate::{
     clock::{Clock, SystemClock},
     config::{GuardConfig, Mode, StepUpPolicy},
     error::GuardError,
-    event::{ClientSummary, EventKind, SessionEvent},
+    event::{ClientSummary, EventKind, SessionEvent, SessionOrigin, mask_ip},
     fingerprint::{Baseline, Fingerprint, UaCache},
     intel::{IpIntel, NoIpIntel},
     store::{ClaimScope, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
@@ -233,7 +233,21 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         let encoded = crate::subject::encode(subject)?;
         let token = SessionToken::generate()?;
         let now = self.now();
-        let fingerprint = self.fingerprint(ctx);
+        let info = inner.intel.lookup(ctx.ip);
+        let fingerprint = Fingerprint::capture_cached(ctx, &info, &inner.ua_cache);
+        let client = ClientSummary::observed(info, fingerprint.clone());
+        let keep = inner.config.keep_origin_client;
+        let origin = SessionOrigin {
+            at: now,
+            ip_prefix: mask_ip(ctx.ip),
+            ip: keep.then_some(ctx.ip),
+            user_agent: keep.then(|| self.user_agent(ctx)).flatten(),
+            client: if keep {
+                client.clone()
+            } else {
+                client.clone().minimized()
+            },
+        };
         let record = SessionRecord {
             id: Uuid::new_v4(),
             subject: encoded,
@@ -243,9 +257,10 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             expires_at: now + inner.config.session_lifetime,
             step_up_required: false,
             baseline: Baseline::new(fingerprint),
+            origin: Some(origin),
         };
         inner.store.insert_session(&record, &token.hash()).await?;
-        self.emit(record.id, &record.subject, EventKind::Login, true, ctx, None)
+        self.emit_with(record.id, &record.subject, EventKind::Login, true, ctx, None, client)
             .await;
         Ok(NewSession {
             session_id: record.id,
@@ -715,6 +730,13 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         Fingerprint::capture_cached(ctx, &self.inner.intel.lookup(ctx.ip), &self.inner.ua_cache)
     }
 
+    /// The request's User-Agent, truncated to the header cap.
+    fn user_agent(&self, ctx: &ClientContext) -> Option<String> {
+        ctx.user_agent
+            .as_deref()
+            .map(|ua| crate::client::truncate(ua, self.inner.config.max_header_len).to_owned())
+    }
+
     fn client_summary(&self, ctx: &ClientContext) -> ClientSummary {
         let info = self.inner.intel.lookup(ctx.ip);
         let fingerprint = Fingerprint::capture_cached(ctx, &info, &self.inner.ua_cache);
@@ -841,6 +863,23 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         ctx: &ClientContext,
         assessment: Option<&crate::risk::Assessment>,
     ) {
+        let client = self.client_summary(ctx);
+        self.emit_with(session_id, subject, kind, enforced, ctx, assessment, client)
+            .await;
+    }
+
+    /// [`emit`](Self::emit) with the client summary already built.
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_with(
+        &self,
+        session_id: Uuid,
+        subject: &str,
+        kind: EventKind,
+        enforced: bool,
+        ctx: &ClientContext,
+        assessment: Option<&crate::risk::Assessment>,
+        client: ClientSummary,
+    ) {
         let inner = &*self.inner;
         let config = &inner.config;
         let now = self.now();
@@ -890,11 +929,8 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             score: assessment.map(|a| a.score),
             signals: assessment.map(|a| a.signals.clone()).unwrap_or_default(),
             ip: ctx.ip,
-            user_agent: ctx
-                .user_agent
-                .as_deref()
-                .map(|ua| crate::client::truncate(ua, config.max_header_len).to_owned()),
-            client: self.client_summary(ctx),
+            user_agent: self.user_agent(ctx),
+            client,
             at: now,
         };
         if kind.is_security_relevant() {
@@ -946,12 +982,6 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             }
         }
     }
-}
-
-/// Reduces an address to its network prefix (/24 or /48) for event storage.
-fn mask_ip(ip: IpAddr) -> IpAddr {
-    let len = if ip.is_ipv4() { 24 } else { 48 };
-    ipnet::IpNet::new(ip, len).map_or(ip, |net| net.trunc().addr())
 }
 
 fn td(duration: Duration) -> TimeDelta {

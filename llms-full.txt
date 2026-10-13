@@ -64,7 +64,8 @@ Production stores: `PgStore::migrated(pool).await?` (runs embedded migrations, s
 - The hook is synchronous and runs in the request: for slow work, `try_send` a clone of the event into a bounded `tokio::sync::mpsc` channel drained by a spawned task. There is no async hook.
 - `revoke_session(&subject, session_id, &ctx)` deletes the session only if it belongs to `subject` (returns `false` otherwise); `revoke_all_for_subject(&subject, &ctx)` returns how many it deleted. Both record a `revoked` event per deleted session with the caller's client. In axum, `Sessions::guard()` and `Sessions::client()` give the guard and context. Custom stores: `delete_subject_sessions` returns the deleted ids.
 - `SessionEvent` is `#[non_exhaustive]`; `event.client` is a `ClientSummary` (country, city, asn, network, anonymity, browser, os). The hook gets the full event; the stored copy masks the IP to /24 or /48 and drops the raw User-Agent and the city unless `minimize_stored_events(false)`.
-- `GuardConfig::builder()...build()` returns `Result<GuardConfig, ConfigError>`: `mode`, `step_up_policy`, `checks`, `thresholds`, `rotation`, `session_lifetime`, `idle_timeout`, `cookie`, `cookie_name`, `token_prefix`, `trusted_proxies` (returns a `Result`), `tls_fingerprint_header`, `max_header_len`, `ping_pong_window`, `last_seen_write_interval`, `orphan_reissue_window`, `event_retention`, `minimize_stored_events`, `shadow_dedup_window`, `alert_dedup_window`.
+- `guard.list_sessions(&subject)` and `guard.peek(token)` return `SessionInfo` (`#[non_exhaustive]`): timestamps, browser, os, country and `origin: Option<SessionOrigin>` (`at`, `ip_prefix`, `ip`, `user_agent`, `client`), recorded at login; `None` for sessions created before 0.2. The origin keeps only the /24 or /48 network and a `ClientSummary` without city unless `keep_origin_client(true)`, which adds the full IP, truncated User-Agent and city.
+- `GuardConfig::builder()...build()` returns `Result<GuardConfig, ConfigError>`: `mode`, `step_up_policy`, `checks`, `thresholds`, `rotation`, `session_lifetime`, `idle_timeout`, `cookie`, `cookie_name`, `token_prefix`, `trusted_proxies` (returns a `Result`), `tls_fingerprint_header`, `max_header_len`, `ping_pong_window`, `last_seen_write_interval`, `orphan_reissue_window`, `event_retention`, `minimize_stored_events`, `keep_origin_client`, `shadow_dedup_window`, `alert_dedup_window`.
 - Rotation: a token older than `rotation.interval` (10 min) gets a new `Set-Cookie`; the old one stays valid for `grace` (30 s). A superseded token whose successor was used is reuse and revokes the session, even in shadow mode. An orphaned token (successor never presented) is reissued once and scored with `orphaned_token` (25); `orphan_reissue_window` optionally bounds its age.
 - Risk: weighted checks (`Check`, `Checks::default()`, `Checks::none()`, `Checks::strict()`); score below 40 allows, 40 to 79 is step-up, 80 or more revokes (`Thresholds`). Per route: `guard.layer().with(Checks::strict())`.
 - `StepUpPolicy`: `Require` (default; reject with `step_up_required` until the app calls `complete_step_up`), `Revoke` or `Allow`.
@@ -595,18 +596,23 @@ Apply a different set per route with `guard.layer().with(Checks::strict())`.
 | `thresholds` | step-up 40, revoke 80 |
 | `alert_dedup_window` | off (hook alerts are not deduplicated per subject) |
 | `orphan_reissue_window` | off (orphans are reissued until `rotation.reuse_detection` prunes them; zero never reissues) |
+| `minimize_stored_events` | on (stored events keep the IP's /24 or /48, no raw User-Agent, no city) |
+| `keep_origin_client` | off (a session's origin keeps the IP's /24 or /48, no raw User-Agent, no city) |
 
 `grace` must be shorter than `interval`. `last_seen_write_interval` limits store writes on the hot path.
 Roll out in shadow mode first: watch the events, tune weights, then switch to `Mode::Enforce`.
 
 ## Privacy and GDPR
 
-Stored per session: the subject, timestamps, the token hashes and a fingerprint baseline (IP prefix, country, ASN, browser, OS, client hints, languages, TLS fingerprint).
+Stored per session: the subject, timestamps, the token hashes, a fingerprint baseline (IP prefix, country, ASN, browser, OS, client hints, languages, TLS fingerprint) and a `SessionOrigin` recorded at login (time, IP /24 or /48 network, `ClientSummary` without city).
+`keep_origin_client(true)` also keeps the origin's full IP, truncated User-Agent and city; leave it off unless you need them.
 Events carry the client IP, a truncated User-Agent and a `ClientSummary` (country, city, ASN, network name, anonymizer, browser, OS).
 The `on_event` hook always gets all of it, e.g. to email the subject where a sign-in came from.
 The stored copy is minimized by default: the IP is masked to /24 (IPv4) or /48 (IPv6), and the raw User-Agent and the city are left out. `minimize_stored_events(false)` stores the full event.
 Events are kept for 90 days (`event_retention`); `guard.purge_expired()` deletes expired sessions and old events and returns a `PurgeReport`. Call it periodically, or let `guard.spawn_purge(every)` (`tokio` feature) do it.
 You, as the controller, decide the legal basis, the retention you configure, and how data subjects' requests are handled (`list_sessions`, `revoke_all_for_subject`).
+
+`guard.list_sessions(&subject)` returns a `SessionInfo` per live session for a "your devices" page: timestamps, the current browser, OS and country, and `origin` (where the session started; `None` for sessions created before 0.2).
 
 ## MaxMind
 
@@ -1301,6 +1307,10 @@ pub struct SessionView {
     pub os: Option<String>,
     /// Country, if an IP intelligence source is configured.
     pub country: Option<String>,
+    /// Network (/24 or /48) the session signed in from.
+    pub signed_in_from: Option<String>,
+    /// Country the session signed in from, if an IP intelligence source is configured.
+    pub signed_in_country: Option<String>,
 }
 
 impl SessionView {
@@ -1314,6 +1324,8 @@ impl SessionView {
             browser: info.browser,
             os: info.os,
             country: info.country,
+            signed_in_from: info.origin.as_ref().map(|o| o.ip_prefix.to_string()),
+            signed_in_country: info.origin.and_then(|o| o.client.country),
         }
     }
 }
