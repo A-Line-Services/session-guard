@@ -1792,6 +1792,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2364,24 +2370,24 @@ dependencies = [
 
 [[package]]
 name = "rovo"
-version = "0.4.12"
+version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c28b89fb0d5c3c09bcfecace19c483fcd1227ada35c2cee7c87f28dccc033ae7"
+checksum = "fccde1e9f31325543fe3ab4124cd10f31f8111628df421c49b844286a264d4b1"
 dependencies = [
  "aide",
  "axum",
  "rovo-macros",
  "rovo-schemars-derive",
  "schemars 0.9.0",
+ "serde-saphyr",
  "serde_json",
- "serde_yaml",
 ]
 
 [[package]]
 name = "rovo-macros"
-version = "0.4.12"
+version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4024409bf523dcaf1cfb14231de393570234dc3fce256dd0873adfdd424aa090"
+checksum = "f11b21171005cca89d57e702a1372d89cb1e0f139026275974ec22851e94483d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2595,6 +2601,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-saphyr"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
+dependencies = [
+ "base64 0.23.1",
+ "nohash-hasher",
+ "num-traits",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2716,19 +2735,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.7",
-]
-
-[[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap 2.14.2",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
 ]
 
 [[package]]
@@ -3561,12 +3567,6 @@ name = "unicode-properties"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
-
-[[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"
