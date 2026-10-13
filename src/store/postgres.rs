@@ -300,12 +300,12 @@ impl SessionStore for PgStore {
         Ok(done.rows_affected() > 0)
     }
 
-    async fn delete_subject_sessions(&self, subject: &str) -> Result<u64, StoreError> {
-        let done = sqlx::query("DELETE FROM session_guard_sessions WHERE subject = $1")
+    async fn delete_subject_sessions(&self, subject: &str) -> Result<Vec<Uuid>, StoreError> {
+        let ids = sqlx::query_scalar("DELETE FROM session_guard_sessions WHERE subject = $1 RETURNING id")
             .bind(subject)
-            .execute(&self.pool)
+            .fetch_all(&self.pool)
             .await?;
-        Ok(done.rows_affected())
+        Ok(ids)
     }
 
     async fn list_subject_sessions(&self, subject: &str) -> Result<Vec<SessionRecord>, StoreError> {

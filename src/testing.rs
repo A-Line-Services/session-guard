@@ -515,24 +515,30 @@ pub async fn delete_session_removes_tokens<St: SessionStore>(store: St) {
     assert!(store.find_by_token(&t2).await.unwrap().is_none());
 }
 
-/// Deleting a subject's sessions leaves other subjects alone.
+/// Deleting a subject's sessions returns their ids and leaves other subjects alone.
 pub async fn delete_subject_sessions<St: SessionStore>(store: St) {
     let now = now_secs();
     let subject = format!("\"conformance-{}\"", Uuid::new_v4());
     let mut tokens = Vec::new();
+    let mut ids = Vec::new();
     for _ in 0..3 {
         let token = random_hash();
-        store
-            .insert_session(&sample_session_for(&subject, now), &token)
-            .await
-            .unwrap();
+        let session = sample_session_for(&subject, now);
+        store.insert_session(&session, &token).await.unwrap();
         tokens.push(token);
+        ids.push(session.id);
     }
     let other = random_hash();
     store.insert_session(&sample_session(now), &other).await.unwrap();
 
-    assert_eq!(store.delete_subject_sessions(&subject).await.unwrap(), 3);
-    assert_eq!(store.delete_subject_sessions(&subject).await.unwrap(), 0);
+    let mut deleted = store.delete_subject_sessions(&subject).await.unwrap();
+    deleted.sort();
+    ids.sort();
+    assert_eq!(deleted, ids);
+    assert_eq!(
+        store.delete_subject_sessions(&subject).await.unwrap(),
+        Vec::<Uuid>::new()
+    );
     for token in &tokens {
         assert!(store.find_by_token(token).await.unwrap().is_none());
     }

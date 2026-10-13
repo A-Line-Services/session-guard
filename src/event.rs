@@ -34,11 +34,15 @@ pub enum EventKind {
     TokenReuse,
     /// A token whose successor never reached the client was replaced (lost response).
     TokenReissued,
+    /// The app ended the session ([`Guard::revoke_session`](crate::Guard::revoke_session) or
+    /// [`Guard::revoke_all_for_subject`](crate::Guard::revoke_all_for_subject)). The event's
+    /// client is whoever asked, not the session's.
+    Revoked,
 }
 
 impl EventKind {
     /// Every kind, in declaration order.
-    pub const ALL: [EventKind; 7] = [
+    pub const ALL: [EventKind; 8] = [
         EventKind::Login,
         EventKind::Logout,
         EventKind::StepUpRequired,
@@ -46,6 +50,7 @@ impl EventKind {
         EventKind::RiskRevoked,
         EventKind::TokenReuse,
         EventKind::TokenReissued,
+        EventKind::Revoked,
     ];
 
     /// Stable `snake_case` name, as stored.
@@ -58,6 +63,7 @@ impl EventKind {
             EventKind::RiskRevoked => "risk_revoked",
             EventKind::TokenReuse => "token_reuse",
             EventKind::TokenReissued => "token_reissued",
+            EventKind::Revoked => "revoked",
         }
     }
 

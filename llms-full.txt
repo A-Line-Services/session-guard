@@ -61,6 +61,8 @@ Production stores: `PgStore::migrated(pool).await?` (runs embedded migrations, s
 
 - `Guard::new(store)` uses `GuardConfig::default()`. `Guard::builder(store, config)` sets `.subject::<T>()`, `.ip_intel(..)`, `.on_event(..)` and `.clock(..)`, then `.build()`.
 - `on_event` is called once per state change, in the process that made the change, after the event is stored; only the request whose change took effect reports it (racing requests may each report `step_up_required`). Delivery is at most once: no outbox, so a crash between the change and the hook loses the event. `alert_dedup_window` (default off) lets enforced security events reach the hook at most once per subject and kind per window; they are still stored.
+- The hook is synchronous and runs in the request: for slow work, `try_send` a clone of the event into a bounded `tokio::sync::mpsc` channel drained by a spawned task. There is no async hook.
+- `revoke_session(&subject, session_id, &ctx)` deletes the session only if it belongs to `subject` (returns `false` otherwise); `revoke_all_for_subject(&subject, &ctx)` returns how many it deleted. Both record a `revoked` event per deleted session with the caller's client. In axum, `Sessions::guard()` and `Sessions::client()` give the guard and context. Custom stores: `delete_subject_sessions` returns the deleted ids.
 - `SessionEvent` is `#[non_exhaustive]`; `event.client` is a `ClientSummary` (country, city, asn, network, anonymity, browser, os). The hook gets the full event; the stored copy masks the IP to /24 or /48 and drops the raw User-Agent and the city unless `minimize_stored_events(false)`.
 - `GuardConfig::builder()...build()` returns `Result<GuardConfig, ConfigError>`: `mode`, `step_up_policy`, `checks`, `thresholds`, `rotation`, `session_lifetime`, `idle_timeout`, `cookie`, `cookie_name`, `token_prefix`, `trusted_proxies` (returns a `Result`), `tls_fingerprint_header`, `max_header_len`, `ping_pong_window`, `last_seen_write_interval`, `orphan_reissue_window`, `event_retention`, `minimize_stored_events`, `shadow_dedup_window`, `alert_dedup_window`.
 - Rotation: a token older than `rotation.interval` (10 min) gets a new `Set-Cookie`; the old one stays valid for `grace` (30 s). A superseded token whose successor was used is reuse and revokes the session, even in shadow mode. An orphaned token (successor never presented) is reissued once and scored with `orphaned_token` (25); `orphan_reissue_window` optionally bounds its age.
@@ -230,6 +232,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `Guard::new` uses `GuardConfig::default()`. Use `Guard::builder(store, config)` to change the config, set a custom subject type (`.subject::<T>()`), an `IpIntel` source, an event hook (`.on_event`) or a clock.
 The event hook is called once per state change, in the process that made the change, after the event is stored. Of several racing requests only the one whose change took effect reports it, except `step_up_required`, which each racing request may report. Delivery is at most once: there is no outbox, so a crash between the change and the hook loses the event.
 To page a subject's owner once rather than once per session, set `alert_dedup_window`: enforced security events (`step_up_required`, `risk_revoked`, `token_reuse`, `token_reissued`) then reach the hook at most once per subject and kind per window, across instances through `SessionStore::claim_event`. Suppressed duplicates are still logged and stored; if the claim fails, the hook is called anyway.
+`revoke_session(subject, id, ctx)` (scoped to `subject`, so another subject's session id is a no-op) and `revoke_all_for_subject(subject, ctx)` record a `revoked` event per session they delete, carrying the client that asked.
+
+The hook runs inside the request and is synchronous. For slow work (email, webhooks), hand the event to a task and never wait on it:
+
+```rust
+use session_guard::{Guard, GuardConfig, MemoryStore, SessionEvent};
+use tokio::sync::mpsc;
+
+#[tokio::main]
+async fn main() {
+    let (tx, mut rx) = mpsc::channel::<SessionEvent>(1024);
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            // Send the email, call the webhook...
+            println!("{} on session {}", event.kind, event.session_id);
+        }
+    });
+    let _guard = Guard::builder(MemoryStore::new(), GuardConfig::default())
+        .on_event(move |event| {
+            // A full queue drops the event rather than slowing the request.
+            if tx.try_send(event.clone()).is_err() {
+                eprintln!("event queue full, dropped {}", event.kind);
+            }
+        })
+        .build();
+}
+```
+
 `PgStore::migrated` runs the embedded migrations and is safe to call from many processes. To run them in your own pipeline, use `PgStore::migrator()` and `PgStore::new(pool)` instead.
 Without `ConnectInfo<SocketAddr>` the layer fails closed with a 500.
 
@@ -1488,13 +1518,16 @@ use rovo::{
     response::Json,
     rovo,
 };
-use session_guard::AuthSession;
+use session_guard::{AuthSession, Sessions};
 use uuid::Uuid;
 
-use crate::app::{
-    errors::AppError,
-    models::{Done, ErrorBody, Me, SessionView},
-    state::AppState,
+use crate::{
+    Store,
+    app::{
+        errors::AppError,
+        models::{Done, ErrorBody, Me, SessionView},
+        state::AppState,
+    },
 };
 
 /// The signed-in user.
@@ -1558,19 +1591,20 @@ pub async fn list_sessions(
 /// # Metadata
 ///
 /// @tag account
-#[rovo]
+#[rovo(state = AppState)]
 pub async fn revoke_session(
-    State(state): State<AppState>,
     session: AuthSession<Uuid>,
+    sessions: Sessions<Store>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Done>, AppError> {
-    // `revoke_session` takes any id, so check ownership first: otherwise a user could revoke
-    // someone else's session.
-    let sessions = state.guard.list_sessions(&session.subject).await?;
-    if !sessions.iter().any(|s| s.session_id == id) {
+    // Scoped to the signed-in user: someone else's session id is a 404.
+    if !sessions
+        .guard()
+        .revoke_session(&session.subject, id, sessions.client())
+        .await?
+    {
         return Err(AppError::NotFound);
     }
-    state.guard.revoke_session(id).await?;
     Ok(Json(Done { ok: true }))
 }
 ```

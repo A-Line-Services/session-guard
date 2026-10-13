@@ -766,7 +766,7 @@ impl SessionStore for FailingClaims {
         self.0.delete_session(session_id).await
     }
 
-    async fn delete_subject_sessions(&self, subject: &str) -> Result<u64, crate::StoreError> {
+    async fn delete_subject_sessions(&self, subject: &str) -> Result<Vec<Uuid>, crate::StoreError> {
         self.0.delete_subject_sessions(subject).await
     }
 
@@ -918,16 +918,43 @@ async fn logout_and_bulk_revocation() {
     let _c = login(&h, user).await;
     let other = login(&h, Uuid::new_v4()).await;
     assert_eq!(h.guard.list_sessions(&user).await.unwrap().len(), 2);
-    assert_eq!(h.guard.revoke_all_for_subject(&user).await.unwrap(), 2);
+    assert_eq!(h.guard.revoke_all_for_subject(&user, &home()).await.unwrap(), 2);
     assert_eq!(
         rejected(h.guard.authenticate(&b, &home()).await.unwrap()),
         Rejection::NotAuthenticated
     );
     authenticated(h.guard.authenticate(&other, &home()).await.unwrap());
 
-    let id = h.guard.peek(&other).await.unwrap().unwrap().session_id;
-    assert!(h.guard.revoke_session(id).await.unwrap());
+    let owner = h.guard.peek(&other).await.unwrap().unwrap();
+    let id = owner.session_id;
+    assert!(!h.guard.revoke_session(&user, id, &home()).await.unwrap());
+    assert!(h.guard.peek(&other).await.unwrap().is_some());
+    assert!(h.guard.revoke_session(&owner.subject, id, &home()).await.unwrap());
     assert!(h.guard.peek(&other).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn revocation_reports_each_session_once() {
+    let h = harness();
+    let user = Uuid::new_v4();
+    let a = login(&h, user).await;
+    login(&h, user).await;
+    login(&h, Uuid::new_v4()).await;
+    let a_id = h.guard.peek(&a).await.unwrap().unwrap().session_id;
+
+    assert!(h.guard.revoke_session(&user, a_id, &abroad()).await.unwrap());
+    assert!(!h.guard.revoke_session(&user, a_id, &abroad()).await.unwrap());
+    assert_eq!(h.guard.revoke_all_for_subject(&user, &home()).await.unwrap(), 1);
+    assert_eq!(h.guard.revoke_all_for_subject(&user, &home()).await.unwrap(), 0);
+
+    let events = h.events.lock().unwrap().clone();
+    let revoked: Vec<_> = events.iter().filter(|e| e.kind == EventKind::Revoked).collect();
+    assert_eq!(revoked.len(), 2);
+    assert_eq!(revoked[0].session_id, a_id);
+    assert_eq!(revoked[0].ip, abroad().ip);
+    assert_ne!(revoked[1].session_id, a_id);
+    assert!(revoked.iter().all(|e| e.enforced && e.subject::<Uuid>() == Some(user)));
+    assert!(!EventKind::Revoked.is_security_relevant());
 }
 
 #[tokio::test]
@@ -1312,7 +1339,7 @@ impl SessionStore for RacingStore {
         self.inner.delete_session(session_id).await
     }
 
-    async fn delete_subject_sessions(&self, subject: &str) -> Result<u64, crate::StoreError> {
+    async fn delete_subject_sessions(&self, subject: &str) -> Result<Vec<Uuid>, crate::StoreError> {
         self.inner.delete_subject_sessions(subject).await
     }
 

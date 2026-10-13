@@ -132,7 +132,7 @@ async fn key_prefixes_isolate_stores() {
     assert!(a.find_by_token(&token).await.unwrap().is_some());
     assert!(b.find_by_token(&token).await.unwrap().is_none());
     assert_eq!(b.list_subject_sessions(&subject).await.unwrap(), vec![]);
-    assert_eq!(b.delete_subject_sessions(&subject).await.unwrap(), 0);
+    assert_eq!(b.delete_subject_sessions(&subject).await.unwrap(), Vec::<Uuid>::new());
     assert!(!b.delete_session(session.id).await.unwrap());
     assert!(!b.apply(&SessionUpdate::touch(session.id, now)).await.unwrap());
     assert_eq!(a.list_subject_sessions(&subject).await.unwrap(), vec![session]);
@@ -145,8 +145,11 @@ async fn subjects_with_lua_metacharacters_are_opaque() {
     let subject = format!("\"x']]..redis.call('FLUSHALL')--{}\"", Uuid::new_v4());
     let session = testing::sample_session_for(&subject, now);
     store.insert_session(&session, &testing::random_hash()).await.unwrap();
-    assert_eq!(store.list_subject_sessions(&subject).await.unwrap(), vec![session]);
-    assert_eq!(store.delete_subject_sessions(&subject).await.unwrap(), 1);
+    assert_eq!(
+        store.list_subject_sessions(&subject).await.unwrap(),
+        vec![session.clone()]
+    );
+    assert_eq!(store.delete_subject_sessions(&subject).await.unwrap(), vec![session.id]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

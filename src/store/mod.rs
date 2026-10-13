@@ -179,8 +179,8 @@ pub trait SessionStore: Send + Sync + 'static {
     /// Deletes a session and its tokens. Returns whether it existed.
     fn delete_session(&self, session_id: Uuid) -> impl Future<Output = Result<bool, StoreError>> + Send;
 
-    /// Deletes every session of `subject` (canonical JSON). Returns how many.
-    fn delete_subject_sessions(&self, subject: &str) -> impl Future<Output = Result<u64, StoreError>> + Send;
+    /// Deletes every session of `subject` (canonical JSON). Returns the ids it deleted.
+    fn delete_subject_sessions(&self, subject: &str) -> impl Future<Output = Result<Vec<Uuid>, StoreError>> + Send;
 
     /// Every session of `subject` (canonical JSON), including expired ones not yet purged.
     fn list_subject_sessions(
@@ -247,7 +247,7 @@ impl<T: SessionStore> SessionStore for std::sync::Arc<T> {
         (**self).delete_session(session_id)
     }
 
-    fn delete_subject_sessions(&self, subject: &str) -> impl Future<Output = Result<u64, StoreError>> + Send {
+    fn delete_subject_sessions(&self, subject: &str) -> impl Future<Output = Result<Vec<Uuid>, StoreError>> + Send {
         (**self).delete_subject_sessions(subject)
     }
 

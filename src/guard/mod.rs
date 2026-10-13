@@ -544,23 +544,41 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         Ok(deleted)
     }
 
-    /// Deletes one session by id, e.g. from a "your devices" page. Returns whether it existed.
-    ///
-    /// # Errors
-    ///
-    /// Store failures only.
-    pub async fn revoke_session(&self, session_id: Uuid) -> Result<bool, GuardError> {
-        Ok(self.inner.store.delete_session(session_id).await?)
-    }
-
-    /// Deletes every session of `subject`, e.g. after a password change. Returns how many.
+    /// Deletes one session of `subject` by id, e.g. from a "your devices" page. Returns whether
+    /// it existed; a session of another subject is left alone. `ctx` is whoever asked; it goes
+    /// into the [`EventKind::Revoked`] event.
     ///
     /// # Errors
     ///
     /// Store failures or a subject that does not serialize.
-    pub async fn revoke_all_for_subject(&self, subject: &S) -> Result<u64, GuardError> {
+    pub async fn revoke_session(&self, subject: &S, session_id: Uuid, ctx: &ClientContext) -> Result<bool, GuardError> {
         let encoded = crate::subject::encode(subject)?;
-        Ok(self.inner.store.delete_subject_sessions(&encoded).await?)
+        let sessions = self.inner.store.list_subject_sessions(&encoded).await?;
+        if !sessions.iter().any(|s| s.id == session_id) {
+            return Ok(false);
+        }
+        let deleted = self.inner.store.delete_session(session_id).await?;
+        if deleted {
+            self.emit(session_id, &encoded, EventKind::Revoked, true, ctx, None)
+                .await;
+        }
+        Ok(deleted)
+    }
+
+    /// Deletes every session of `subject`, e.g. after a password change. Returns how many.
+    /// `ctx` is whoever asked; each session gets an [`EventKind::Revoked`] event.
+    ///
+    /// # Errors
+    ///
+    /// Store failures or a subject that does not serialize.
+    pub async fn revoke_all_for_subject(&self, subject: &S, ctx: &ClientContext) -> Result<u64, GuardError> {
+        let encoded = crate::subject::encode(subject)?;
+        let deleted = self.inner.store.delete_subject_sessions(&encoded).await?;
+        for &session_id in &deleted {
+            self.emit(session_id, &encoded, EventKind::Revoked, true, ctx, None)
+                .await;
+        }
+        Ok(deleted.len() as u64)
     }
 
     /// The live sessions of `subject`.

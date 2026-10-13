@@ -191,7 +191,7 @@ impl SessionStore for MemoryStore {
         self.with(|state| state.remove(session_id))
     }
 
-    fn delete_subject_sessions(&self, subject: &str) -> impl Future<Output = Result<u64, StoreError>> + Send {
+    fn delete_subject_sessions(&self, subject: &str) -> impl Future<Output = Result<Vec<Uuid>, StoreError>> + Send {
         self.with(|state| {
             let ids: Vec<Uuid> = state
                 .sessions
@@ -199,7 +199,7 @@ impl SessionStore for MemoryStore {
                 .filter(|e| e.record.subject == subject)
                 .map(|e| e.record.id)
                 .collect();
-            ids.into_iter().filter(|id| state.remove(*id)).count() as u64
+            ids.into_iter().filter(|id| state.remove(*id)).collect()
         })
     }
 

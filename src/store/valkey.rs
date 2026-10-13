@@ -173,12 +173,14 @@ static DELETE_SUBJECT: LazyLock<Script> = LazyLock::new(|| {
     Script::new(concat!(
         lua_helpers!(),
         r"
-local n = 0
+local out = {}
 for _, sid in ipairs(redis.call('SMEMBERS', KEYS[1])) do
-  n = n + del_session(ARGV[1], sid)
+  if del_session(ARGV[1], sid) == 1 then
+    out[#out + 1] = sid
+  end
 end
 redis.call('DEL', KEYS[1])
-return n
+return out
 ",
     ))
 });
@@ -498,13 +500,13 @@ impl SessionStore for ValkeyStore {
         Ok(deleted == 1)
     }
 
-    async fn delete_subject_sessions(&self, subject: &str) -> Result<u64, StoreError> {
-        let deleted: u64 = DELETE_SUBJECT
+    async fn delete_subject_sessions(&self, subject: &str) -> Result<Vec<Uuid>, StoreError> {
+        let deleted: Vec<String> = DELETE_SUBJECT
             .key(self.key("u", subject))
             .arg(&self.prefix)
             .invoke_async(&mut self.conn())
             .await?;
-        Ok(deleted)
+        Ok(deleted.iter().map(|id| Uuid::parse_str(id)).collect::<Result<_, _>>()?)
     }
 
     async fn list_subject_sessions(&self, subject: &str) -> Result<Vec<SessionRecord>, StoreError> {
