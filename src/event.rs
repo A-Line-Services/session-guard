@@ -73,10 +73,13 @@ impl EventKind {
     }
 
     /// Whether this kind points at a possible attack (logged as a warning).
+    ///
+    /// [`TokenReissued`](Self::TokenReissued) is not one: a lost response is routine, and the
+    /// attack signal is [`TokenReuse`](Self::TokenReuse).
     pub const fn is_security_relevant(self) -> bool {
         matches!(
             self,
-            EventKind::StepUpRequired | EventKind::RiskRevoked | EventKind::TokenReuse | EventKind::TokenReissued
+            EventKind::StepUpRequired | EventKind::RiskRevoked | EventKind::TokenReuse
         )
     }
 }
