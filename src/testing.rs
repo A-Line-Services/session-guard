@@ -34,7 +34,7 @@ use crate::{
     event::{ClientSummary, EventKind, SessionEvent},
     fingerprint::{Baseline, Fingerprint},
     intel::Anonymity,
-    store::{Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
+    store::{ClaimScope, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
     token::{SessionToken, TokenHash},
 };
 
@@ -62,6 +62,7 @@ macro_rules! store_conformance {
             delete_expired_absolute_and_idle,
             events_record_and_purge,
             event_claims_dedupe_within_window,
+            subject_claims_dedupe_within_window,
             apply_to_missing_session,
         );
     };
@@ -627,7 +628,7 @@ pub async fn event_claims_dedupe_within_window<St: SessionStore>(store: St) {
     let now = now_secs();
     let window = secs(600);
     let session = Uuid::new_v4();
-    let claim = |kind, at| store.claim_event(session, kind, at, window);
+    let claim = |kind, at| store.claim_event(ClaimScope::Session(session), kind, at, window);
     assert!(claim(EventKind::RiskRevoked, now).await.unwrap());
     assert!(!claim(EventKind::RiskRevoked, now + secs(1)).await.unwrap());
     assert!(!claim(EventKind::RiskRevoked, now + secs(599)).await.unwrap());
@@ -637,7 +638,7 @@ pub async fn event_claims_dedupe_within_window<St: SessionStore>(store: St) {
     );
     assert!(
         store
-            .claim_event(Uuid::new_v4(), EventKind::RiskRevoked, now, window)
+            .claim_event(ClaimScope::Session(Uuid::new_v4()), EventKind::RiskRevoked, now, window)
             .await
             .unwrap(),
         "sessions are independent"
@@ -650,6 +651,50 @@ pub async fn event_claims_dedupe_within_window<St: SessionStore>(store: St) {
         !claim(EventKind::RiskRevoked, now + secs(601)).await.unwrap(),
         "the new claim holds"
     );
+}
+
+/// A claim succeeds once per subject and kind per window, independent of session claims, and
+/// purging events removes old subject claims.
+pub async fn subject_claims_dedupe_within_window<St: SessionStore>(store: St) {
+    let now = now_secs();
+    let window = secs(600);
+    let subject = format!("\"conformance-{}\"", Uuid::new_v4());
+    let claim = |kind, at| store.claim_event(ClaimScope::Subject(&subject), kind, at, window);
+    assert!(claim(EventKind::RiskRevoked, now).await.unwrap());
+    assert!(!claim(EventKind::RiskRevoked, now + secs(1)).await.unwrap());
+    assert!(!claim(EventKind::RiskRevoked, now + secs(599)).await.unwrap());
+    assert!(
+        claim(EventKind::TokenReuse, now).await.unwrap(),
+        "kinds are independent"
+    );
+    let other = format!("\"conformance-{}\"", Uuid::new_v4());
+    assert!(
+        store
+            .claim_event(ClaimScope::Subject(&other), EventKind::RiskRevoked, now, window)
+            .await
+            .unwrap(),
+        "subjects are independent"
+    );
+    let session = Uuid::new_v4();
+    let session_claim = |at| store.claim_event(ClaimScope::Session(session), EventKind::RiskRevoked, at, window);
+    assert!(session_claim(now).await.unwrap(), "session claims are independent");
+    assert!(!session_claim(now + secs(1)).await.unwrap());
+    assert!(
+        claim(EventKind::RiskRevoked, now + secs(600)).await.unwrap(),
+        "the window elapsed"
+    );
+    assert!(
+        !claim(EventKind::RiskRevoked, now + secs(601)).await.unwrap(),
+        "the new claim holds"
+    );
+
+    let at = far_past();
+    let old = format!("\"conformance-{}\"", Uuid::new_v4());
+    let claim_old = |at| store.claim_event(ClaimScope::Subject(&old), EventKind::RiskRevoked, at, window);
+    assert!(claim_old(at).await.unwrap());
+    assert!(!claim_old(at + secs(2)).await.unwrap());
+    store.delete_events_before(at + secs(1)).await.unwrap();
+    assert!(claim_old(at + secs(2)).await.unwrap(), "the purge removed the claim");
 }
 
 /// Updating a session that does not exist is not an error.

@@ -34,7 +34,7 @@ use crate::{
     event::{ClientSummary, EventKind, SessionEvent},
     fingerprint::{Baseline, Fingerprint, UaCache},
     intel::{IpIntel, NoIpIntel},
-    store::{Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
+    store::{ClaimScope, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
     subject::Subject,
     token::{SessionToken, TokenHash},
 };
@@ -142,6 +142,11 @@ impl<St: SessionStore, S: Subject> GuardBuilder<St, S> {
     ///
     /// Delivery is at most once. There is no outbox, so a crash between the change and the
     /// hook loses the event.
+    ///
+    /// With [`alert_dedup_window`](crate::GuardConfigBuilder::alert_dedup_window) set, enforced
+    /// security-relevant events reach the hook at most once per subject and kind per window;
+    /// the rest are still logged and stored. If the store cannot claim the alert, the hook is
+    /// called anyway.
     pub fn on_event(mut self, hook: impl Fn(&SessionEvent) + Send + Sync + 'static) -> Self {
         self.hook = Some(Arc::new(hook));
         self
@@ -807,7 +812,8 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
 
     /// Records an event, calls the hook and updates metrics. Never fails: a store error is
     /// logged, a hook panic is caught. Unenforced events are recorded at most once per session
-    /// and kind per dedup window.
+    /// and kind per dedup window. With an alert dedup window, enforced security-relevant events
+    /// reach the hook at most once per subject and kind per window.
     async fn emit(
         &self,
         session_id: Uuid,
@@ -826,7 +832,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             }
             match inner
                 .store
-                .claim_event(session_id, kind, now, config.shadow_dedup_window)
+                .claim_event(ClaimScope::Session(session_id), kind, now, config.shadow_dedup_window)
                 .await
             {
                 Ok(true) => {}
@@ -837,6 +843,26 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
                 }
             }
         }
+        let alert = if inner.hook.is_some()
+            && enforced
+            && kind.is_security_relevant()
+            && !config.alert_dedup_window.is_zero()
+        {
+            match inner
+                .store
+                .claim_event(ClaimScope::Subject(subject), kind, now, config.alert_dedup_window)
+                .await
+            {
+                Ok(claimed) => claimed,
+                // Better a duplicate than a lost alert.
+                Err(error) => {
+                    tracing::error!(%session_id, kind = kind.as_str(), %error, "failed to claim subject alert");
+                    true
+                }
+            }
+        } else {
+            true
+        };
 
         let event = SessionEvent {
             session_id,
@@ -871,7 +897,8 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         if let Err(error) = inner.store.record_event(&stored).await {
             tracing::error!(%session_id, kind = kind.as_str(), %error, "failed to record session event");
         }
-        if let Some(hook) = &inner.hook
+        if alert
+            && let Some(hook) = &inner.hook
             && catch_unwind(AssertUnwindSafe(|| hook(&event))).is_err()
         {
             tracing::error!(%session_id, kind = kind.as_str(), "on_event hook panicked");

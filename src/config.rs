@@ -85,6 +85,7 @@ pub struct GuardConfig {
     pub(crate) event_retention: TimeDelta,
     pub(crate) minimize_stored_events: bool,
     pub(crate) shadow_dedup_window: TimeDelta,
+    pub(crate) alert_dedup_window: TimeDelta,
     pub(crate) max_header_len: usize,
     pub(crate) token_prefix: Option<String>,
     pub(crate) orphan_reissue_window: Option<TimeDelta>,
@@ -185,6 +186,12 @@ impl GuardConfig {
         to_std(self.shadow_dedup_window)
     }
 
+    /// Window in which repeated security alerts for the same subject and kind skip the hook.
+    /// Zero means off.
+    pub fn alert_dedup_window(&self) -> Duration {
+        to_std(self.alert_dedup_window)
+    }
+
     /// Maximum length of a header value considered for fingerprinting.
     pub fn max_header_len(&self) -> usize {
         self.max_header_len
@@ -224,6 +231,7 @@ pub struct GuardConfigBuilder {
     event_retention: Duration,
     minimize_stored_events: bool,
     shadow_dedup_window: Duration,
+    alert_dedup_window: Duration,
     max_header_len: usize,
     token_prefix: Option<String>,
     orphan_reissue_window: Option<Duration>,
@@ -249,6 +257,7 @@ impl Default for GuardConfigBuilder {
             event_retention: Duration::from_secs(90 * DAY),
             minimize_stored_events: true,
             shadow_dedup_window: Duration::from_secs(10 * MINUTE),
+            alert_dedup_window: Duration::ZERO,
             max_header_len: 512,
             token_prefix: None,
             orphan_reissue_window: None,
@@ -389,6 +398,21 @@ impl GuardConfigBuilder {
         self
     }
 
+    /// Per-subject alert dedup window. Default zero (off).
+    ///
+    /// When set, the hook sees at most one enforced security-relevant event per subject and
+    /// kind per window, across processes through [`SessionStore::claim_event`] with
+    /// [`ClaimScope::Subject`]. Use it so an attacker hammering many sessions of one subject
+    /// pages its owner once instead of once per session. Every event is still logged and
+    /// stored; login, logout and step-up completion always reach the hook.
+    ///
+    /// [`SessionStore::claim_event`]: crate::SessionStore::claim_event
+    /// [`ClaimScope::Subject`]: crate::ClaimScope::Subject
+    pub fn alert_dedup_window(mut self, window: Duration) -> Self {
+        self.alert_dedup_window = window;
+        self
+    }
+
     /// Maximum header value length considered. Longer values are truncated. Default 512.
     pub fn max_header_len(mut self, len: usize) -> Self {
         self.max_header_len = len;
@@ -452,6 +476,7 @@ impl GuardConfigBuilder {
             event_retention: positive(self.event_retention, "event_retention")?,
             minimize_stored_events: self.minimize_stored_events,
             shadow_dedup_window: bounded(self.shadow_dedup_window, "shadow_dedup_window")?,
+            alert_dedup_window: bounded(self.alert_dedup_window, "alert_dedup_window")?,
             max_header_len: self.max_header_len,
             token_prefix: self.token_prefix,
             orphan_reissue_window: self
@@ -498,6 +523,7 @@ mod tests {
         assert!(c.minimize_stored_events());
         assert_eq!(c.trusted_proxies(), &[]);
         assert_eq!(c.orphan_reissue_window(), None);
+        assert_eq!(c.alert_dedup_window(), Duration::ZERO);
     }
 
     #[test]
@@ -518,9 +544,11 @@ mod tests {
             .step_up_policy(StepUpPolicy::Allow)
             .minimize_stored_events(false)
             .orphan_reissue_window(Duration::from_secs(3600))
+            .alert_dedup_window(Duration::from_mins(15))
             .build()
             .unwrap();
         assert_eq!(c.cookie().cookie_name(), "__Host-app");
+        assert_eq!(c.alert_dedup_window(), Duration::from_mins(15));
         assert_eq!(c.orphan_reissue_window(), Some(Duration::from_secs(3600)));
         assert_eq!(c.trusted_proxies().len(), 3);
         assert!(
@@ -585,6 +613,10 @@ mod tests {
             b().orphan_reissue_window(Duration::MAX).build().unwrap_err(),
             ConfigError::InvalidDuration("orphan_reissue_window")
         );
+        assert_eq!(
+            b().alert_dedup_window(Duration::MAX).build().unwrap_err(),
+            ConfigError::InvalidDuration("alert_dedup_window")
+        );
         assert!(matches!(
             b().tls_fingerprint_header("x ja4").build(),
             Err(ConfigError::InvalidHeaderName(_))
@@ -611,6 +643,7 @@ mod tests {
             .ping_pong_window(Duration::ZERO)
             .last_seen_write_interval(Duration::ZERO)
             .shadow_dedup_window(Duration::ZERO)
+            .alert_dedup_window(Duration::ZERO)
             .orphan_reissue_window(Duration::ZERO)
             .rotation(RotationConfig {
                 grace: Duration::ZERO,

@@ -125,6 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `Guard::new` uses `GuardConfig::default()`. Use `Guard::builder(store, config)` to change the config, set a custom subject type (`.subject::<T>()`), an `IpIntel` source, an event hook (`.on_event`) or a clock.
 The event hook is called once per state change, in the process that made the change, after the event is stored. Of several racing requests only the one whose change took effect reports it, except `step_up_required`, which each racing request may report. Delivery is at most once: there is no outbox, so a crash between the change and the hook loses the event.
+To page a subject's owner once rather than once per session, set `alert_dedup_window`: enforced security events (`step_up_required`, `risk_revoked`, `token_reuse`, `token_reissued`) then reach the hook at most once per subject and kind per window, across instances through `SessionStore::claim_event`. Suppressed duplicates are still logged and stored; if the claim fails, the hook is called anyway.
 `PgStore::migrated` runs the embedded migrations and is safe to call from many processes. To run them in your own pipeline, use `PgStore::migrator()` and `PgStore::new(pool)` instead.
 Without `ConnectInfo<SocketAddr>` the layer fails closed with a 500.
 
@@ -458,6 +459,7 @@ Apply a different set per route with `guard.layer().with(Checks::strict())`.
 | `ping_pong_window` | 5 minutes (zero disables) |
 | `last_seen_write_interval` | 60 seconds (zero writes on every request) |
 | `thresholds` | step-up 40, revoke 80 |
+| `alert_dedup_window` | off (hook alerts are not deduplicated per subject) |
 | `orphan_reissue_window` | off (orphans are reissued until `rotation.reuse_detection` prunes them; zero never reissues) |
 
 `grace` must be shorter than `interval`. `last_seen_write_interval` limits store writes on the hot path.

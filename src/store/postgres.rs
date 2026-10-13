@@ -11,7 +11,7 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-use super::{SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
+use super::{ClaimScope, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
 use crate::{
     error::StoreError,
     event::{EventKind, SessionEvent},
@@ -354,7 +354,8 @@ impl SessionStore for PgStore {
 
     async fn delete_events_before(&self, cutoff: DateTime<Utc>) -> Result<u64, StoreError> {
         let done = sqlx::query(
-            "WITH claims AS (DELETE FROM session_guard_event_claims WHERE claimed_at < $1)
+            "WITH claims AS (DELETE FROM session_guard_event_claims WHERE claimed_at < $1),
+                  subject_claims AS (DELETE FROM session_guard_subject_claims WHERE claimed_at < $1)
              DELETE FROM session_guard_events WHERE created_at < $1",
         )
         .bind(cutoff)
@@ -365,7 +366,7 @@ impl SessionStore for PgStore {
 
     async fn claim_event(
         &self,
-        session_id: Uuid,
+        scope: ClaimScope<'_>,
         kind: EventKind,
         now: DateTime<Utc>,
         window: TimeDelta,
@@ -373,18 +374,28 @@ impl SessionStore for PgStore {
         // A claim at or before `now - window` has lapsed. If that instant does not exist, no
         // stored claim can have lapsed; NULL never compares true.
         let lapsed_at = now.checked_sub_signed(window);
-        let claimed = sqlx::query(
-            "INSERT INTO session_guard_event_claims (session_id, kind, claimed_at) VALUES ($1, $2, $3)
-             ON CONFLICT (session_id, kind) DO UPDATE SET claimed_at = EXCLUDED.claimed_at
-             WHERE session_guard_event_claims.claimed_at <= $4
-             RETURNING 1",
-        )
-        .bind(session_id)
-        .bind(kind.as_str())
-        .bind(now)
-        .bind(lapsed_at)
-        .fetch_optional(&self.pool)
-        .await?;
+        let query = match scope {
+            ClaimScope::Session(session_id) => sqlx::query(
+                "INSERT INTO session_guard_event_claims (session_id, kind, claimed_at) VALUES ($1, $2, $3)
+                 ON CONFLICT (session_id, kind) DO UPDATE SET claimed_at = EXCLUDED.claimed_at
+                 WHERE session_guard_event_claims.claimed_at <= $4
+                 RETURNING 1",
+            )
+            .bind(session_id),
+            ClaimScope::Subject(subject) => sqlx::query(
+                "INSERT INTO session_guard_subject_claims (subject, kind, claimed_at) VALUES ($1, $2, $3)
+                 ON CONFLICT (subject, kind) DO UPDATE SET claimed_at = EXCLUDED.claimed_at
+                 WHERE session_guard_subject_claims.claimed_at <= $4
+                 RETURNING 1",
+            )
+            .bind(subject),
+        };
+        let claimed = query
+            .bind(kind.as_str())
+            .bind(now)
+            .bind(lapsed_at)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(claimed.is_some())
     }
 }

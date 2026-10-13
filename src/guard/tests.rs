@@ -699,6 +699,131 @@ async fn shadow_dedup_spans_guards_sharing_a_store() {
     assert_eq!(risk, 1);
 }
 
+// --- alert dedup ---
+
+fn alert_dedup(window: Duration) -> Harness {
+    harness_with(GuardConfig::builder().alert_dedup_window(window).build().unwrap())
+}
+
+/// Revokes a fresh session of `user` from the attacker's device.
+async fn revoke(h: &Harness, user: Uuid) {
+    let token = login(h, user).await;
+    assert_eq!(
+        rejected(h.guard.authenticate(&token, &attacker()).await.unwrap()),
+        Rejection::Revoked
+    );
+}
+
+fn stored(h: &Harness, kind: EventKind) -> usize {
+    h.store.events().iter().filter(|e| e.kind == kind).count()
+}
+
+#[tokio::test]
+async fn alerts_are_deduplicated_per_subject_but_still_recorded() {
+    let h = alert_dedup(mins(15));
+    let user = Uuid::new_v4();
+    revoke(&h, user).await;
+    revoke(&h, user).await;
+    assert_eq!(stored(&h, EventKind::RiskRevoked), 2);
+    assert_eq!(h.count(EventKind::RiskRevoked), 1);
+    assert_eq!(h.count(EventKind::Login), 2, "logins are never deduplicated");
+
+    revoke(&h, Uuid::new_v4()).await;
+    assert_eq!(h.count(EventKind::RiskRevoked), 2, "subjects are independent");
+
+    h.advance(mins(15));
+    revoke(&h, user).await;
+    assert_eq!(h.count(EventKind::RiskRevoked), 3, "the window elapsed");
+}
+
+#[tokio::test]
+async fn zero_alert_dedup_window_calls_the_hook_every_time() {
+    let h = alert_dedup(Duration::ZERO);
+    let user = Uuid::new_v4();
+    revoke(&h, user).await;
+    revoke(&h, user).await;
+    assert_eq!(h.count(EventKind::RiskRevoked), 2);
+}
+
+/// A [`MemoryStore`] whose claims always fail.
+#[derive(Default)]
+struct FailingClaims(MemoryStore);
+
+impl SessionStore for FailingClaims {
+    async fn insert_session(&self, session: &SessionRecord, token: &TokenHash) -> Result<(), crate::StoreError> {
+        self.0.insert_session(session, token).await
+    }
+
+    async fn find_by_token(&self, token: &TokenHash) -> Result<Option<crate::store::TokenLookup>, crate::StoreError> {
+        self.0.find_by_token(token).await
+    }
+
+    async fn apply(&self, update: &SessionUpdate) -> Result<bool, crate::StoreError> {
+        self.0.apply(update).await
+    }
+
+    async fn delete_session(&self, session_id: Uuid) -> Result<bool, crate::StoreError> {
+        self.0.delete_session(session_id).await
+    }
+
+    async fn delete_subject_sessions(&self, subject: &str) -> Result<u64, crate::StoreError> {
+        self.0.delete_subject_sessions(subject).await
+    }
+
+    async fn list_subject_sessions(&self, subject: &str) -> Result<Vec<SessionRecord>, crate::StoreError> {
+        self.0.list_subject_sessions(subject).await
+    }
+
+    async fn delete_expired(&self, now: DateTime<Utc>, idle_cutoff: DateTime<Utc>) -> Result<u64, crate::StoreError> {
+        self.0.delete_expired(now, idle_cutoff).await
+    }
+
+    async fn record_event(&self, event: &SessionEvent) -> Result<(), crate::StoreError> {
+        self.0.record_event(event).await
+    }
+
+    async fn delete_events_before(&self, cutoff: DateTime<Utc>) -> Result<u64, crate::StoreError> {
+        self.0.delete_events_before(cutoff).await
+    }
+
+    fn claim_event(
+        &self,
+        _scope: ClaimScope<'_>,
+        _kind: EventKind,
+        _now: DateTime<Utc>,
+        _window: chrono::TimeDelta,
+    ) -> impl Future<Output = Result<bool, crate::StoreError>> + Send {
+        std::future::ready(Err("claims unavailable".into()))
+    }
+}
+
+#[tokio::test]
+async fn failed_alert_claim_still_calls_the_hook() {
+    let store = Arc::new(FailingClaims::default());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&events);
+    let config = GuardConfig::builder().alert_dedup_window(mins(15)).build().unwrap();
+    let guard = Guard::builder(Arc::clone(&store), config)
+        .ip_intel(intel)
+        .on_event(move |e: &SessionEvent| sink.lock().unwrap().push(e.clone()))
+        .build();
+    let user = Uuid::new_v4();
+    for _ in 0..2 {
+        let token = guard.login(&user, &home(), None).await.unwrap().token;
+        assert_eq!(
+            rejected(guard.authenticate(token.expose(), &attacker()).await.unwrap()),
+            Rejection::Revoked
+        );
+    }
+    let hooked = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.kind == EventKind::RiskRevoked)
+        .count();
+    assert_eq!(hooked, 2);
+}
+
 #[tokio::test]
 async fn shadow_mode_still_enforces_reuse() {
     let h = harness_with(GuardConfig::builder().mode(Mode::Shadow).build().unwrap());

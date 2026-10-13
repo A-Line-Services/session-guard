@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use chrono::TimeDelta;
-use session_guard::{EventKind, Rotation, SessionStore, SessionUpdate, Supersede, ValkeyStore, testing};
+use session_guard::{ClaimScope, EventKind, Rotation, SessionStore, SessionUpdate, Supersede, ValkeyStore, testing};
 use uuid::Uuid;
 
 mod support;
@@ -75,24 +75,20 @@ async fn claims_dedupe_across_store_instances() {
     let b = store_with_prefix(&prefix).await;
     let now = testing::now_secs();
     let window = TimeDelta::seconds(600);
-    let session = Uuid::new_v4();
+    let scope = ClaimScope::Session(Uuid::new_v4());
+    assert!(a.claim_event(scope, EventKind::RiskRevoked, now, window).await.unwrap());
     assert!(
-        a.claim_event(session, EventKind::RiskRevoked, now, window)
+        !b.claim_event(scope, EventKind::RiskRevoked, now + TimeDelta::seconds(5), window)
             .await
             .unwrap()
     );
     assert!(
-        !b.claim_event(session, EventKind::RiskRevoked, now + TimeDelta::seconds(5), window)
+        b.claim_event(scope, EventKind::RiskRevoked, now + window, window)
             .await
             .unwrap()
     );
     assert!(
-        b.claim_event(session, EventKind::RiskRevoked, now + window, window)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !a.claim_event(session, EventKind::RiskRevoked, now + window, window)
+        !a.claim_event(scope, EventKind::RiskRevoked, now + window, window)
             .await
             .unwrap()
     );
@@ -103,10 +99,10 @@ async fn claims_older_than_cutoff_are_purged() {
     let store = store().await;
     let now = testing::now_secs();
     let window = TimeDelta::seconds(600);
-    let session = Uuid::new_v4();
+    let scope = ClaimScope::Session(Uuid::new_v4());
     assert!(
         store
-            .claim_event(session, EventKind::RiskRevoked, now, window)
+            .claim_event(scope, EventKind::RiskRevoked, now, window)
             .await
             .unwrap()
     );
@@ -116,7 +112,7 @@ async fn claims_older_than_cutoff_are_purged() {
     );
     assert!(
         store
-            .claim_event(session, EventKind::RiskRevoked, now + TimeDelta::seconds(1), window)
+            .claim_event(scope, EventKind::RiskRevoked, now + TimeDelta::seconds(1), window)
             .await
             .unwrap(),
         "the purged claim no longer blocks"

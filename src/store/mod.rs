@@ -93,6 +93,16 @@ pub enum Supersede {
     Current,
 }
 
+/// What an event claim is deduplicated by. See [`SessionStore::claim_event`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ClaimScope<'a> {
+    /// One session; used for unenforced events.
+    Session(Uuid),
+    /// Every session of a subject (canonical JSON); used for hook alerts.
+    Subject(&'a str),
+}
+
 /// Replace the current token with a new one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rotation {
@@ -193,20 +203,25 @@ pub trait SessionStore: Send + Sync + 'static {
     /// than `cutoff`.
     fn delete_events_before(&self, cutoff: DateTime<Utc>) -> impl Future<Output = Result<u64, StoreError>> + Send;
 
-    /// Claims the right to record an unenforced `kind` event for a session, for shadow-mode
-    /// deduplication across processes. Succeeds (`true`) unless a claim for the same session
-    /// and kind was made after `now - window`, and records `now` as the new claim when it
-    /// does. Must be atomic across processes.
+    /// Claims the right to report a `kind` event for `scope`, for deduplication across
+    /// processes. Succeeds (`true`) unless a claim for the same scope and kind was made after
+    /// `now - window`, and records `now` as the new claim when it does. Session and subject
+    /// claims are independent. Must be atomic across processes.
     ///
-    /// The default always succeeds, which leaves deduplication to each process.
+    /// The guard claims [`ClaimScope::Session`] before recording an unenforced event
+    /// (`shadow_dedup_window`) and [`ClaimScope::Subject`] before calling the hook for an
+    /// enforced one (`alert_dedup_window`).
+    ///
+    /// The default always succeeds, which leaves shadow deduplication to each process and
+    /// disables alert deduplication.
     fn claim_event(
         &self,
-        session_id: Uuid,
+        scope: ClaimScope<'_>,
         kind: EventKind,
         now: DateTime<Utc>,
         window: TimeDelta,
     ) -> impl Future<Output = Result<bool, StoreError>> + Send {
-        let _ = (session_id, kind, now, window);
+        let _ = (scope, kind, now, window);
         std::future::ready(Ok(true))
     }
 }
@@ -261,11 +276,11 @@ impl<T: SessionStore> SessionStore for std::sync::Arc<T> {
 
     fn claim_event(
         &self,
-        session_id: Uuid,
+        scope: ClaimScope<'_>,
         kind: EventKind,
         now: DateTime<Utc>,
         window: TimeDelta,
     ) -> impl Future<Output = Result<bool, StoreError>> + Send {
-        (**self).claim_event(session_id, kind, now, window)
+        (**self).claim_event(scope, kind, now, window)
     }
 }

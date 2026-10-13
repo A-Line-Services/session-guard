@@ -131,7 +131,7 @@ pub use store::PgStore;
 #[cfg_attr(docsrs, doc(cfg(feature = "valkey")))]
 pub use store::ValkeyStore;
 pub use store::{
-    MemoryStore, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord,
+    ClaimScope, MemoryStore, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord,
 };
 pub use subject::Subject;
 pub use token::{SessionToken, TOKEN_LEN, TokenHash, is_well_formed};

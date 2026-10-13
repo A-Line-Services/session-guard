@@ -7,7 +7,7 @@ use redis::{Script, aio::ConnectionManager};
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::{SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
+use super::{ClaimScope, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
 use crate::{
     checks::Check,
     error::StoreError,
@@ -268,8 +268,9 @@ return 1
 /// | `P x` | sorted set | session ids scored by `expires_at` |
 /// | `P i` | sorted set | session ids scored by `last_seen_at` |
 /// | `P e` | sorted set | events as JSON, scored by `at` |
-/// | `P c:{session id}:{kind}` | string | time of the last event claim |
-/// | `P cz` | sorted set | `{session id}:{kind}` claims scored by claim time |
+/// | `P c:{session id}:{kind}` | string | time of the last session event claim |
+/// | `P c:s:{subject}:{kind}` | string | time of the last subject alert claim |
+/// | `P cz` | sorted set | `{session id}:{kind}` and `s:{subject}:{kind}` claims scored by claim time |
 ///
 /// Session, token and per-session token-set keys expire at the session's absolute expiry and
 /// subject sets at their last session's expiry, so Valkey cleans up even if
@@ -568,12 +569,16 @@ impl SessionStore for ValkeyStore {
 
     async fn claim_event(
         &self,
-        session_id: Uuid,
+        scope: ClaimScope<'_>,
         kind: EventKind,
         now: DateTime<Utc>,
         window: TimeDelta,
     ) -> Result<bool, StoreError> {
-        let member = format!("{session_id}:{kind}");
+        // A session id never starts with `s:`, and no kind contains `:`, so members are unique.
+        let member = match scope {
+            ClaimScope::Session(session_id) => format!("{session_id}:{kind}"),
+            ClaimScope::Subject(subject) => format!("s:{subject}:{kind}"),
+        };
         let micros_window = window.num_microseconds().unwrap_or(i64::MAX);
         let millis_window = window.num_milliseconds().max(1);
         let claimed: i64 = CLAIM
