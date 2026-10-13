@@ -47,7 +47,8 @@
 //! - `tokio`: `Guard::spawn_purge`, a background task that purges expired sessions.
 //! - `postgres`: a [`SessionStore`] on sqlx with embedded migrations.
 //! - `valkey`: a [`SessionStore`] on Valkey or Redis.
-//! - `maxmind`: [`IpIntel`] backed by `MaxMind` `GeoLite2`/`GeoIP2` databases.
+//! - `maxmind`: [`IpIntel`] backed by `MaxMind` `GeoLite2`/`GeoIP2` databases, reloaded when
+//!   `geoipupdate` replaces the files.
 //! - `metrics`: counters through the `metrics` facade.
 //! - `testing`: the `store_conformance!` suite for custom stores.
 #![forbid(unsafe_code)]

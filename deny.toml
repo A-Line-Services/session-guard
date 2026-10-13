@@ -12,19 +12,27 @@ allow = [
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
     "ISC",
     "Unicode-3.0",
     "Zlib",
-    "CDLA-Permissive-2.0",
 ]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
+# Upstream crates lagging behind an ecosystem-wide major bump. Each entry
+# turns into an `unnecessary-skip` warning once upstream catches up.
+skip = [
+    { crate = "base64@0.22", reason = "sqlx 0.9 and testcontainers (bollard, tonic) still depend on 0.22" },
+    { crate = "hashbrown@0.16", reason = "sqlx-core 0.9 pins hashlink 0.11, which uses hashbrown 0.16" },
+    { crate = "syn@2", reason = "proc-macros (sqlx, tracing, schemars, axum-macros, ...) have not moved to syn 3" },
+]
+skip-tree = [
+    { crate = "sha2@0.10", reason = "sqlx-core 0.9 still uses the RustCrypto 0.10 digest stack" },
+]
 
 [sources]
 unknown-registry = "deny"

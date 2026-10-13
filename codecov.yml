@@ -1,0 +1,14 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        # Tolerate jitter from concurrency tests taking different branches.
+        threshold: 1%
+    patch:
+      default:
+        target: 90%
+
+comment:
+  layout: "condensed_header, diff, flags, files"
+  require_changes: true
