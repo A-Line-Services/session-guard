@@ -11,7 +11,7 @@ use super::{SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, 
 use crate::{
     checks::Check,
     error::StoreError,
-    event::{EventKind, SessionEvent},
+    event::{ClientSummary, EventKind, SessionEvent},
     fingerprint::Baseline,
     token::TokenHash,
 };
@@ -381,6 +381,7 @@ struct EventRow<'a> {
     signals: &'a [Check],
     ip: IpAddr,
     user_agent: Option<&'a str>,
+    client: &'a ClientSummary,
     at: DateTime<Utc>,
 }
 
@@ -542,6 +543,7 @@ impl SessionStore for ValkeyStore {
             signals: &event.signals,
             ip: event.ip,
             user_agent: event.user_agent.as_deref(),
+            client: &event.client,
             at: event.at,
         };
         let _added: i64 = redis::cmd("ZADD")

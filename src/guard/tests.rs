@@ -73,6 +73,8 @@ fn intel(ip: IpAddr) -> IpInfo {
         _ => ("US", 64500),
     };
     IpInfo::new(Some(country.into()), Some(asn))
+        .with_city("Springfield")
+        .with_network("Example Net")
 }
 
 struct Harness<S = Uuid> {
@@ -918,10 +920,50 @@ async fn peek_is_read_only() {
 }
 
 #[tokio::test]
-async fn minimised_event_ip() {
-    let h = harness_with(GuardConfig::builder().minimize_event_ip(true).build().unwrap());
+async fn stored_events_are_minimised_by_default() {
+    let h = harness();
     login(&h, Uuid::new_v4()).await;
-    assert_eq!(h.events.lock().unwrap()[0].ip, ip("203.0.113.0"));
+    let hooked = h.events.lock().unwrap()[0].clone();
+    assert_eq!(hooked.ip, ip("203.0.113.7"), "the hook sees the full address");
+    assert_eq!(hooked.user_agent.as_deref(), Some(CHROME_WIN));
+    assert_eq!(hooked.client.city.as_deref(), Some("Springfield"));
+    let stored = &h.store.events()[0];
+    assert_eq!(stored.ip, ip("203.0.113.0"));
+    assert_eq!(stored.user_agent, None, "the families in `client` are enough");
+    assert_eq!(stored.client.city, None, "the city would undo the masking");
+    assert_eq!(stored.client.country.as_deref(), Some("US"));
+    assert_eq!(stored.client.browser.as_deref(), Some("Chrome"));
+}
+
+#[tokio::test]
+async fn events_describe_the_client() {
+    let h = harness_with(GuardConfig::builder().minimize_stored_events(false).build().unwrap());
+    login(&h, Uuid::new_v4()).await;
+    let event = h.events.lock().unwrap()[0].clone();
+    let client = &event.client;
+    assert_eq!(client.country.as_deref(), Some("US"));
+    assert_eq!(client.city.as_deref(), Some("Springfield"));
+    assert_eq!(client.asn, Some(64500));
+    assert_eq!(client.network.as_deref(), Some("Example Net"));
+    assert_eq!(client.anonymity, None);
+    assert_eq!(client.browser.as_deref(), Some("Chrome"));
+    assert_eq!(client.os.as_deref(), Some("Windows"));
+    assert_eq!(h.store.events()[0], event, "stored as is when minimisation is off");
+}
+
+#[tokio::test]
+async fn reuse_event_describes_the_presenting_client() {
+    let h = harness();
+    let t0 = login(&h, Uuid::new_v4()).await;
+    h.advance(mins(11));
+    authenticated(h.guard.authenticate(&t0, &home()).await.unwrap());
+    h.advance(mins(1));
+    authenticated(h.guard.authenticate(&t0, &home()).await.unwrap());
+    h.advance(mins(1));
+    rejected(h.guard.authenticate(&t0, &abroad()).await.unwrap());
+    let events = h.events.lock().unwrap();
+    let reuse = events.iter().find(|e| e.kind == EventKind::TokenReuse).unwrap();
+    assert_eq!(reuse.client.country.as_deref(), Some("DE"));
 }
 
 #[tokio::test]

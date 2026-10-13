@@ -95,10 +95,10 @@ fn authenticate(c: &mut Criterion) {
 }
 
 fn risk(c: &mut Criterion) {
-    let known = Fingerprint::capture(&ctx(), IpInfo::new(Some("BE".into()), Some(5432)));
+    let known = Fingerprint::capture(&ctx(), &IpInfo::new(Some("BE".into()), Some(5432)));
     let baseline = Baseline::new(known);
     let moved = ClientContext::new("198.51.100.20".parse().unwrap()).with_user_agent(FIREFOX);
-    let current = Fingerprint::capture(&moved, IpInfo::new(Some("NL".into()), Some(1136)));
+    let current = Fingerprint::capture(&moved, &IpInfo::new(Some("NL".into()), Some(1136)));
     let checks = Checks::default();
     let window = TimeDelta::minutes(10);
     c.bench_function("risk/assess_changed", |b| {
@@ -109,11 +109,11 @@ fn risk(c: &mut Criterion) {
 fn user_agent(c: &mut Criterion) {
     let ctx = ctx();
     c.bench_function("user_agent/uncached", |b| {
-        b.iter(|| Fingerprint::capture(black_box(&ctx), IpInfo::default()));
+        b.iter(|| Fingerprint::capture(black_box(&ctx), &IpInfo::default()));
     });
     let cache = CachedCapture::new(1024);
     c.bench_function("user_agent/cached", |b| {
-        b.iter(|| cache.capture(black_box(&ctx), IpInfo::default()));
+        b.iter(|| cache.capture(black_box(&ctx), &IpInfo::default()));
     });
 }
 

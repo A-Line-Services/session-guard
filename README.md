@@ -466,16 +466,17 @@ Roll out in shadow mode first: watch the events, tune weights, then switch to `M
 ## Privacy and GDPR
 
 Stored per session: the subject, timestamps, the token hashes and a fingerprint baseline (IP prefix, country, ASN, browser, OS, client hints, languages, TLS fingerprint).
-Events additionally store the client IP and a truncated User-Agent.
+Events carry the client IP, a truncated User-Agent and a `ClientSummary` (country, city, ASN, network name, anonymizer, browser, OS).
+The `on_event` hook always gets all of it, e.g. to email the subject where a sign-in came from.
+The stored copy is minimized by default: the IP is masked to /24 (IPv4) or /48 (IPv6), and the raw User-Agent and the city are left out. `minimize_stored_events(false)` stores the full event.
 Events are kept for 90 days (`event_retention`); `guard.purge_expired()` deletes expired sessions and old events and returns a `PurgeReport`. Call it periodically, or let `guard.spawn_purge(every)` (`tokio` feature) do it.
-`minimize_event_ip(true)` masks event IPs to /24 (IPv4) or /48 (IPv6).
 You, as the controller, decide the legal basis, the retention you configure, and how data subjects' requests are handled (`list_sessions`, `revoke_all_for_subject`).
 
 ## MaxMind
 
 Enable `maxmind` and give the guard an `IpIntel` source. Without one, IP changes are judged by network prefix only.
 
-A lookup returns an `IpInfo` with the ISO country code (City or Country edition), the English city name (City edition only), the autonomous system number and its organization name, e.g. `"Example Telecom"` (ASN database), and the anonymity (see [Anonymizers](#anonymizers)). The guard neither scores nor stores the city and network name; they are there for the app, e.g. to describe where a sign-in came from.
+A lookup returns an `IpInfo` with the ISO country code (City or Country edition), the English city name (City edition only), the autonomous system number and its organization name, e.g. `"Example Telecom"` (ASN database), and the anonymity (see [Anonymizers](#anonymizers)). The guard does not score the city or the network name. Both reach the `on_event` hook in `SessionEvent::client`, e.g. to describe where a sign-in came from; the stored copy leaves out the city by default (see [Privacy and GDPR](#privacy-and-gdpr)).
 
 `MaxMindIntel` reads the databases into memory, so lookups never touch the disk. `geoipupdate` (a cron job, a sidecar or an auto-updated volume) replaces the files when MaxMind publishes new ones, and the guard only sees them after a reload. With the `tokio` feature, `spawn_reload` checks the files on an interval and reloads them when they change:
 

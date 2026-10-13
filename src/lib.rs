@@ -98,7 +98,7 @@ pub mod __bench {
         }
 
         /// [`Fingerprint::capture`], parsing the User-Agent through the cache.
-        pub fn capture(&self, ctx: &ClientContext, info: IpInfo) -> Fingerprint {
+        pub fn capture(&self, ctx: &ClientContext, info: &IpInfo) -> Fingerprint {
             Fingerprint::capture_cached(ctx, info, &self.0)
         }
     }
@@ -113,7 +113,7 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{GuardConfig, GuardConfigBuilder, Mode, RotationConfig, StepUpPolicy};
 pub use cookie::{CookieConfig, SameSite, find_cookie};
 pub use error::{ConfigError, GuardError, StoreError};
-pub use event::{EventKind, SessionEvent};
+pub use event::{ClientSummary, EventKind, SessionEvent};
 pub use fingerprint::{Baseline, Fingerprint, ip_prefix};
 pub use guard::{
     AuthSession, Authenticated, Guard, GuardBuilder, IssuedToken, NewSession, Outcome, PurgeReport, Rejection,

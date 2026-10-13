@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use crate::{
     checks::Check,
-    event::{EventKind, SessionEvent},
+    event::{ClientSummary, EventKind, SessionEvent},
     fingerprint::{Baseline, Fingerprint},
     intel::Anonymity,
     store::{Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
@@ -599,6 +599,12 @@ pub async fn events_record_and_purge<St: SessionStore>(store: St) {
         signals: vec![Check::OsChanged, Check::CountryChanged],
         ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 0)),
         user_agent: Some("Mozilla/5.0 🦀".into()),
+        client: ClientSummary {
+            country: Some("BE".into()),
+            asn: Some(64500),
+            browser: Some("Firefox".into()),
+            ..ClientSummary::default()
+        },
         at,
     };
     store.record_event(&event).await.unwrap();
@@ -607,6 +613,7 @@ pub async fn events_record_and_purge<St: SessionStore>(store: St) {
             user_agent: None,
             score: None,
             signals: vec![],
+            client: ClientSummary::default(),
             ..event.clone()
         })
         .await

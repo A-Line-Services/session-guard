@@ -334,8 +334,8 @@ impl SessionStore for PgStore {
         let signals: Vec<&str> = event.signals.iter().map(|c| c.as_str()).collect();
         sqlx::query(
             "INSERT INTO session_guard_events
-                 (session_id, subject, kind, enforced, score, signals, ip, user_agent, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                 (session_id, subject, kind, enforced, score, signals, ip, user_agent, client, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(event.session_id)
         .bind(&event.subject)
@@ -345,6 +345,7 @@ impl SessionStore for PgStore {
         .bind(signals)
         .bind(event.ip)
         .bind(event.user_agent.as_deref())
+        .bind(sqlx::types::Json(&event.client))
         .bind(event.at)
         .execute(&self.pool)
         .await?;

@@ -44,7 +44,7 @@ pub struct Fingerprint {
 
 impl Fingerprint {
     /// Normalises a request context. `info` comes from the [`IpIntel`](crate::IpIntel) source.
-    pub fn capture(ctx: &ClientContext, info: IpInfo) -> Self {
+    pub fn capture(ctx: &ClientContext, info: &IpInfo) -> Self {
         Self::build(
             ctx,
             info,
@@ -52,7 +52,7 @@ impl Fingerprint {
         )
     }
 
-    pub(crate) fn capture_cached(ctx: &ClientContext, info: IpInfo, cache: &UaCache) -> Self {
+    pub(crate) fn capture_cached(ctx: &ClientContext, info: &IpInfo, cache: &UaCache) -> Self {
         Self::build(
             ctx,
             info,
@@ -60,10 +60,10 @@ impl Fingerprint {
         )
     }
 
-    fn build(ctx: &ClientContext, info: IpInfo, ua: ParsedUa) -> Self {
+    fn build(ctx: &ClientContext, info: &IpInfo, ua: ParsedUa) -> Self {
         Self {
             ip_prefix: ip_prefix(ctx.ip),
-            country: info.country.filter(|c| !c.is_empty()),
+            country: info.country.clone().filter(|c| !c.is_empty()),
             asn: info.asn,
             browser: ua.browser,
             browser_major: ua.major,
@@ -271,7 +271,7 @@ pub(crate) mod tests {
 
     #[test]
     fn captures_normalised_signals() {
-        let fp = Fingerprint::capture(&ctx(Some(CHROME_WIN)), IpInfo::new(Some("BE".into()), Some(5432)));
+        let fp = Fingerprint::capture(&ctx(Some(CHROME_WIN)), &IpInfo::new(Some("BE".into()), Some(5432)));
         assert_eq!(fp.ip_prefix, "203.0.113.0/24");
         assert_eq!(fp.country.as_deref(), Some("BE"));
         assert_eq!(fp.asn, Some(5432));
@@ -283,25 +283,25 @@ pub(crate) mod tests {
         assert_eq!(fp.anonymity, None);
 
         let info = IpInfo::default().with_anonymity(Anonymity::Vpn);
-        let fp = Fingerprint::capture(&ctx(Some(CHROME_WIN)), info);
+        let fp = Fingerprint::capture(&ctx(Some(CHROME_WIN)), &info);
         assert_eq!(fp.anonymity, Some(Anonymity::Vpn));
     }
 
     #[test]
     fn cached_capture_matches_uncached() {
         let cache = UaCache::new(8);
-        let a = Fingerprint::capture(&ctx(Some(CHROME_WIN)), IpInfo::default());
-        let b = Fingerprint::capture_cached(&ctx(Some(CHROME_WIN)), IpInfo::default(), &cache);
-        let c = Fingerprint::capture_cached(&ctx(Some(CHROME_WIN)), IpInfo::default(), &cache);
+        let a = Fingerprint::capture(&ctx(Some(CHROME_WIN)), &IpInfo::default());
+        let b = Fingerprint::capture_cached(&ctx(Some(CHROME_WIN)), &IpInfo::default(), &cache);
+        let c = Fingerprint::capture_cached(&ctx(Some(CHROME_WIN)), &IpInfo::default(), &cache);
         assert_eq!(a, b);
         assert_eq!(b, c);
     }
 
     #[test]
     fn garbage_user_agent_yields_unknowns() {
-        let fp = Fingerprint::capture(&ctx(Some("definitely not a browser")), IpInfo::default());
+        let fp = Fingerprint::capture(&ctx(Some("definitely not a browser")), &IpInfo::default());
         assert_eq!((fp.browser, fp.browser_major, fp.os), (None, None, None));
-        let fp = Fingerprint::capture(&ctx(None), IpInfo::default());
+        let fp = Fingerprint::capture(&ctx(None), &IpInfo::default());
         assert_eq!(fp.browser, None);
     }
 
@@ -310,11 +310,11 @@ pub(crate) mod tests {
         let mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
         let iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
         assert_eq!(
-            Fingerprint::capture(&ctx(Some(mac)), IpInfo::default()).os.as_deref(),
+            Fingerprint::capture(&ctx(Some(mac)), &IpInfo::default()).os.as_deref(),
             Some("macOS")
         );
         assert_eq!(
-            Fingerprint::capture(&ctx(Some(iphone)), IpInfo::default())
+            Fingerprint::capture(&ctx(Some(iphone)), &IpInfo::default())
                 .os
                 .as_deref(),
             Some("iOS")
@@ -338,7 +338,7 @@ pub(crate) mod tests {
     }
 
     fn base() -> Fingerprint {
-        Fingerprint::capture(&ctx(Some(CHROME_WIN)), IpInfo::new(Some("BE".into()), Some(5432)))
+        Fingerprint::capture(&ctx(Some(CHROME_WIN)), &IpInfo::new(Some("BE".into()), Some(5432)))
     }
 
     #[test]

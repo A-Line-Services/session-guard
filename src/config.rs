@@ -83,7 +83,7 @@ pub struct GuardConfig {
     pub(crate) ping_pong_window: TimeDelta,
     pub(crate) last_seen_write_interval: TimeDelta,
     pub(crate) event_retention: TimeDelta,
-    pub(crate) minimize_event_ip: bool,
+    pub(crate) minimize_stored_events: bool,
     pub(crate) shadow_dedup_window: TimeDelta,
     pub(crate) max_header_len: usize,
     pub(crate) token_prefix: Option<String>,
@@ -174,9 +174,10 @@ impl GuardConfig {
         to_std(self.event_retention)
     }
 
-    /// Whether events store only the IP prefix (/24 or /48) instead of the full address.
-    pub fn minimize_event_ip(&self) -> bool {
-        self.minimize_event_ip
+    /// Whether the store gets a reduced copy of each event; see
+    /// [`GuardConfigBuilder::minimize_stored_events`].
+    pub fn minimize_stored_events(&self) -> bool {
+        self.minimize_stored_events
     }
 
     /// Window in which repeated shadow events for the same session and kind are dropped.
@@ -221,7 +222,7 @@ pub struct GuardConfigBuilder {
     ping_pong_window: Duration,
     last_seen_write_interval: Duration,
     event_retention: Duration,
-    minimize_event_ip: bool,
+    minimize_stored_events: bool,
     shadow_dedup_window: Duration,
     max_header_len: usize,
     token_prefix: Option<String>,
@@ -246,7 +247,7 @@ impl Default for GuardConfigBuilder {
             ping_pong_window: Duration::from_secs(5 * MINUTE),
             last_seen_write_interval: Duration::from_secs(MINUTE),
             event_retention: Duration::from_secs(90 * DAY),
-            minimize_event_ip: false,
+            minimize_stored_events: true,
             shadow_dedup_window: Duration::from_secs(10 * MINUTE),
             max_header_len: 512,
             token_prefix: None,
@@ -373,9 +374,12 @@ impl GuardConfigBuilder {
         self
     }
 
-    /// Store only the IP prefix (/24 or /48) in events. Default off.
-    pub fn minimize_event_ip(mut self, minimize: bool) -> Self {
-        self.minimize_event_ip = minimize;
+    /// Write a reduced copy of each event to the store: the IP's /24 (IPv4) or /48 (IPv6)
+    /// network instead of the address, no raw User-Agent (the browser and OS families stay in
+    /// [`ClientSummary`](crate::ClientSummary)) and no city. Default on. The
+    /// [`on_event`](crate::GuardBuilder::on_event) hook always gets the full event.
+    pub fn minimize_stored_events(mut self, minimize: bool) -> Self {
+        self.minimize_stored_events = minimize;
         self
     }
 
@@ -446,7 +450,7 @@ impl GuardConfigBuilder {
             ping_pong_window: bounded(self.ping_pong_window, "ping_pong_window")?,
             last_seen_write_interval: bounded(self.last_seen_write_interval, "last_seen_write_interval")?,
             event_retention: positive(self.event_retention, "event_retention")?,
-            minimize_event_ip: self.minimize_event_ip,
+            minimize_stored_events: self.minimize_stored_events,
             shadow_dedup_window: bounded(self.shadow_dedup_window, "shadow_dedup_window")?,
             max_header_len: self.max_header_len,
             token_prefix: self.token_prefix,
@@ -491,7 +495,7 @@ mod tests {
         assert_eq!(c.checks(), &Checks::default());
         assert_eq!(c.thresholds(), Thresholds::default());
         assert_eq!(c.event_retention(), Duration::from_hours(90 * 24));
-        assert!(!c.minimize_event_ip());
+        assert!(c.minimize_stored_events());
         assert_eq!(c.trusted_proxies(), &[]);
         assert_eq!(c.orphan_reissue_window(), None);
     }
@@ -512,7 +516,7 @@ mod tests {
             })
             .mode(Mode::Shadow)
             .step_up_policy(StepUpPolicy::Allow)
-            .minimize_event_ip(true)
+            .minimize_stored_events(false)
             .orphan_reissue_window(Duration::from_secs(3600))
             .build()
             .unwrap();
@@ -537,7 +541,7 @@ mod tests {
         assert_eq!(c.tls_fingerprint_header(), Some("x-ja4"));
         assert_eq!(c.mode(), Mode::Shadow);
         assert_eq!(c.step_up_policy(), StepUpPolicy::Allow);
-        assert!(c.minimize_event_ip());
+        assert!(!c.minimize_stored_events());
     }
 
     #[test]

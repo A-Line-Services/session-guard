@@ -5,6 +5,7 @@ mod outcome;
 mod tests;
 
 use std::{
+    borrow::Cow,
     collections::HashMap,
     marker::PhantomData,
     net::IpAddr,
@@ -30,7 +31,7 @@ use crate::{
     clock::{Clock, SystemClock},
     config::{GuardConfig, Mode, StepUpPolicy},
     error::GuardError,
-    event::{EventKind, SessionEvent},
+    event::{ClientSummary, EventKind, SessionEvent},
     fingerprint::{Baseline, Fingerprint, UaCache},
     intel::{IpIntel, NoIpIntel},
     store::{Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede},
@@ -688,7 +689,13 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
     }
 
     fn fingerprint(&self, ctx: &ClientContext) -> Fingerprint {
-        Fingerprint::capture_cached(ctx, self.inner.intel.lookup(ctx.ip), &self.inner.ua_cache)
+        Fingerprint::capture_cached(ctx, &self.inner.intel.lookup(ctx.ip), &self.inner.ua_cache)
+    }
+
+    fn client_summary(&self, ctx: &ClientContext) -> ClientSummary {
+        let info = self.inner.intel.lookup(ctx.ip);
+        let fingerprint = Fingerprint::capture_cached(ctx, &info, &self.inner.ua_cache);
+        ClientSummary::observed(info, fingerprint)
     }
 
     fn presented_hash(&self, presented: &str) -> Option<TokenHash> {
@@ -831,11 +838,6 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             }
         }
 
-        let ip = if config.minimize_event_ip {
-            mask_ip(ctx.ip)
-        } else {
-            ctx.ip
-        };
         let event = SessionEvent {
             session_id,
             subject: subject.to_owned(),
@@ -843,11 +845,12 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             enforced,
             score: assessment.map(|a| a.score),
             signals: assessment.map(|a| a.signals.clone()).unwrap_or_default(),
-            ip,
+            ip: ctx.ip,
             user_agent: ctx
                 .user_agent
                 .as_deref()
                 .map(|ua| crate::client::truncate(ua, config.max_header_len).to_owned()),
+            client: self.client_summary(ctx),
             at: now,
         };
         if kind.is_security_relevant() {
@@ -855,7 +858,17 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         } else {
             tracing::debug!(%session_id, kind = kind.as_str(), "session event");
         }
-        if let Err(error) = inner.store.record_event(&event).await {
+        let stored = if config.minimize_stored_events {
+            Cow::Owned(SessionEvent {
+                ip: mask_ip(event.ip),
+                user_agent: None,
+                client: event.client.clone().minimized(),
+                ..event.clone()
+            })
+        } else {
+            Cow::Borrowed(&event)
+        };
+        if let Err(error) = inner.store.record_event(&stored).await {
             tracing::error!(%session_id, kind = kind.as_str(), %error, "failed to record session event");
         }
         if let Some(hook) = &inner.hook
