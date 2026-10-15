@@ -21,6 +21,8 @@ use crate::{
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     state: Mutex<State>,
+    /// Test double for a sharded store: records writes whose token and session buckets differ.
+    sharded: bool,
 }
 
 #[derive(Debug, Default)]
@@ -29,6 +31,7 @@ struct State {
     token_index: HashMap<TokenHash, Uuid>,
     events: Vec<SessionEvent>,
     claims: HashMap<(ClaimKey, EventKind), DateTime<Utc>>,
+    misaligned: Vec<Uuid>,
 }
 
 /// An owned [`ClaimScope`].
@@ -140,7 +143,28 @@ impl MemoryStore {
     }
 }
 
+#[cfg(test)]
+impl MemoryStore {
+    /// Reports itself as [sharded](SessionStore::sharded) and records every session whose id and
+    /// token buckets differ.
+    pub(crate) fn sharded() -> Self {
+        Self {
+            sharded: true,
+            ..Self::default()
+        }
+    }
+
+    /// Sessions that were written with a token outside their bucket.
+    pub(crate) fn misaligned(&self) -> Vec<Uuid> {
+        self.lock().misaligned.clone()
+    }
+}
+
 impl SessionStore for MemoryStore {
+    fn sharded(&self) -> bool {
+        self.sharded
+    }
+
     fn insert_session(
         &self,
         session: &SessionRecord,
@@ -148,6 +172,9 @@ impl SessionStore for MemoryStore {
     ) -> impl Future<Output = Result<(), StoreError>> + Send {
         let result = {
             let mut state = self.lock();
+            if self.sharded && super::token_bucket(token) != super::session_bucket(session.id) {
+                state.misaligned.push(session.id);
+            }
             if state.token_index.contains_key(token) || state.sessions.contains_key(&session.id) {
                 Err("duplicate session id or token".into())
             } else {
@@ -184,7 +211,15 @@ impl SessionStore for MemoryStore {
     }
 
     fn apply(&self, update: &SessionUpdate) -> impl Future<Output = Result<bool, StoreError>> + Send {
-        self.with(|state| state.apply(update))
+        self.with(|state| {
+            if self.sharded
+                && let Some(rotation) = &update.rotation
+                && super::token_bucket(&rotation.new_token) != super::session_bucket(update.session_id)
+            {
+                state.misaligned.push(update.session_id);
+            }
+            state.apply(update)
+        })
     }
 
     fn delete_session(&self, session_id: Uuid) -> impl Future<Output = Result<bool, StoreError>> + Send {

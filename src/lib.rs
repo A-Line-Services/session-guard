@@ -132,6 +132,7 @@ pub use store::PgStore;
 pub use store::ValkeyStore;
 pub use store::{
     ClaimScope, MemoryStore, Rotation, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord,
+    session_bucket, token_bucket,
 };
 pub use subject::Subject;
 pub use token::{SessionToken, TOKEN_LEN, TokenHash, is_well_formed};

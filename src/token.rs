@@ -35,6 +35,21 @@ impl SessionToken {
         Ok(Self(SecretString::from(encoded)))
     }
 
+    /// Generates a token whose hash falls in `bucket` (its first byte), for stores that
+    /// [shard](crate::store::SessionStore::sharded) by bucket. Takes 256 draws on average.
+    ///
+    /// # Errors
+    ///
+    /// [`GuardError::Random`] if the operating system RNG is unavailable.
+    pub(crate) fn generate_in_bucket(bucket: u8) -> Result<Self, GuardError> {
+        loop {
+            let token = Self::generate()?;
+            if token.hash().as_bytes()[0] == bucket {
+                return Ok(token);
+            }
+        }
+    }
+
     /// The cookie value. Avoid logging it.
     pub fn expose(&self) -> &str {
         self.0.expose_secret()
@@ -139,6 +154,15 @@ mod tests {
         assert!(is_well_formed(a.expose()));
         assert_ne!(a.expose(), b.expose());
         assert_eq!(URL_SAFE_NO_PAD.decode(a.expose()).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn generate_in_bucket_lands_the_hash_in_the_bucket() {
+        for bucket in [0_u8, 1, 0x7f, 0xff] {
+            let token = SessionToken::generate_in_bucket(bucket).unwrap();
+            assert_eq!(token.hash().as_bytes()[0], bucket);
+            assert!(is_well_formed(token.expose()));
+        }
     }
 
     #[test]
