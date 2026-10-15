@@ -167,3 +167,20 @@ async fn connect_errors_convert_into_box_dyn_error() {
     }
     assert!(connect("not a url").await.is_err());
 }
+
+#[tokio::test]
+async fn duplicate_session_ids_and_tokens_are_rejected() {
+    use session_guard::SessionStore;
+    let store = store().await;
+    let now = testing::now_secs();
+    let session = testing::sample_session(now);
+    let token = testing::random_hash();
+    store.insert_session(&session, &token).await.unwrap();
+    assert!(store.insert_session(&session, &testing::random_hash()).await.is_err());
+    assert!(
+        store
+            .insert_session(&testing::sample_session(now), &token)
+            .await
+            .is_err()
+    );
+}

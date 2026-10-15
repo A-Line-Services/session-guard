@@ -24,6 +24,10 @@ test-postgres:
 test-valkey:
     cargo nextest run --features valkey,testing --test valkey
 
+# Store tests against a Valkey Cluster (testcontainers, one node; set VALKEY_CLUSTER_URL for a real one).
+test-valkey-cluster:
+    cargo nextest run --features valkey,testing --test valkey_cluster
+
 # End-to-end HTTP tests (axum + Postgres + Valkey, testcontainers).
 e2e:
     cargo nextest run --all-features --test e2e

@@ -18,6 +18,18 @@ use std::future::Future;
 use chrono::{DateTime, TimeDelta, Utc};
 use uuid::Uuid;
 
+/// The bucket a session id belongs to: its last byte. Sharded stores keep all of a session's
+/// records in this bucket, and the guard sets that byte when it creates the id.
+pub fn session_bucket(id: Uuid) -> u8 {
+    id.as_bytes()[15]
+}
+
+/// The bucket a token belongs to: the first byte of its hash. A session's tokens share its
+/// [`session_bucket`] when the store is [sharded](SessionStore::sharded).
+pub fn token_bucket(hash: &TokenHash) -> u8 {
+    hash.as_bytes()[0]
+}
+
 pub use memory::MemoryStore;
 #[cfg(feature = "postgres")]
 #[cfg_attr(docsrs, doc(cfg(feature = "postgres")))]
@@ -155,6 +167,15 @@ impl SessionUpdate {
 /// Every method must be safe to call concurrently from many processes. Each returned future
 /// must be `Send`. Timestamps may be stored at microsecond precision.
 pub trait SessionStore: Send + Sync + 'static {
+    /// Whether the store partitions data into [buckets](session_bucket) that must be co-located.
+    ///
+    /// When `true`, the guard gives every session an id whose [`session_bucket`] it picks, and
+    /// mines each of the session's tokens until its [`token_bucket`] is the same, so one session's
+    /// records always live together. The default, `false`, skips that work.
+    fn sharded(&self) -> bool {
+        false
+    }
+
     /// Stores a new session with `token` as its current token (`issued_at = created_at`,
     /// unused, not superseded).
     fn insert_session(
@@ -229,6 +250,10 @@ pub trait SessionStore: Send + Sync + 'static {
 }
 
 impl<T: SessionStore> SessionStore for std::sync::Arc<T> {
+    fn sharded(&self) -> bool {
+        (**self).sharded()
+    }
+
     fn insert_session(
         &self,
         session: &SessionRecord,

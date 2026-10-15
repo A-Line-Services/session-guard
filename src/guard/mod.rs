@@ -231,7 +231,8 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         }
 
         let encoded = crate::subject::encode(subject)?;
-        let token = SessionToken::generate()?;
+        let session_id = Uuid::new_v4();
+        let token = self.new_token(session_id)?;
         let now = self.now();
         let info = inner.intel.lookup(ctx.ip);
         let fingerprint = Fingerprint::capture_cached(ctx, &info, &inner.ua_cache);
@@ -249,7 +250,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             },
         };
         let record = SessionRecord {
-            id: Uuid::new_v4(),
+            id: session_id,
             subject: encoded,
             created_at: now,
             authenticated_at: now,
@@ -295,9 +296,20 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         self.authenticate_inner(token, ctx, checks).await
     }
 
+    /// A token for `session_id`; on a [sharded](SessionStore::sharded) store, one that lands in
+    /// the session's bucket.
+    fn new_token(&self, session_id: Uuid) -> Result<SessionToken, GuardError> {
+        if self.inner.store.sharded() {
+            SessionToken::generate_in_bucket(crate::store::session_bucket(session_id))
+        } else {
+            SessionToken::generate()
+        }
+    }
+
     /// The rotation due for a token in `state`, with its replacement.
     fn plan_rotation(
         &self,
+        session_id: Uuid,
         state: TokenState,
         issued_at: DateTime<Utc>,
         hash: TokenHash,
@@ -309,7 +321,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             TokenState::Orphaned => Supersede::CurrentIssuedBefore(now - config.rotation_grace),
             _ => return Ok(None),
         };
-        let token = SessionToken::generate()?;
+        let token = self.new_token(session_id)?;
         let rotation = Rotation {
             new_token: token.hash(),
             supersede,
@@ -408,7 +420,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             }
         }
 
-        let new_token = match self.plan_rotation(state, lookup.token.issued_at, hash, now)? {
+        let new_token = match self.plan_rotation(lookup.session.id, state, lookup.token.issued_at, hash, now)? {
             Some((rotation, token)) => {
                 update.rotation = Some(rotation);
                 Some(token)
@@ -491,7 +503,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             return Ok(StepUpOutcome::SubjectMismatch);
         }
 
-        let token = SessionToken::generate()?;
+        let token = self.new_token(session.id)?;
         let mut update = SessionUpdate::touch(session.id, now);
         update.baseline = Some(Baseline::new(self.fingerprint(ctx)));
         update.step_up_required = Some(false);

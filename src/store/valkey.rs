@@ -3,11 +3,19 @@
 use std::{fmt, net::IpAddr, sync::LazyLock};
 
 use chrono::{DateTime, TimeDelta, Utc};
-use redis::{Script, aio::ConnectionManager};
+use redis::{
+    RedisFuture, Script, Value,
+    aio::{ConnectionLike, ConnectionManager},
+    cluster_async::ClusterConnection,
+};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::{ClaimScope, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
+use super::{
+    ClaimScope, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord, session_bucket,
+    token_bucket,
+};
 use crate::{
     checks::Check,
     error::StoreError,
@@ -19,7 +27,11 @@ use crate::{
 /// How many sessions one `delete_expired` script invocation removes at most.
 const PURGE_BATCH: usize = 500;
 
-/// Lua helpers shared by several scripts.
+/// How many session ids one `SREM` removes at most.
+const SREM_BATCH: usize = 1000;
+
+/// Lua helpers shared by several scripts. `P` is always a bucket prefix (`prefix{bb}:`), so every
+/// key a script builds shares the hash slot of the keys it was called with.
 macro_rules! lua_helpers {
     () => {
         r"
@@ -30,6 +42,7 @@ local function read_session(P, sid)
   return {sid, v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8] or ''}
 end
 
+-- Deletes a session and its tokens; returns its subject, or false if it did not exist.
 local function del_session(P, sid)
   local s = P .. 's:' .. sid
   local k = P .. 'k:' .. sid
@@ -41,19 +54,17 @@ local function del_session(P, sid)
   redis.call('ZREM', P .. 'x', sid)
   redis.call('ZREM', P .. 'i', sid)
   if subject then
-    redis.call('SREM', P .. 'u:' .. subject, sid)
     redis.call('DEL', s)
-    return 1
+    return subject
   end
-  return 0
+  return false
 end
 "
     };
 }
 
-/// KEYS: session, token, token set, subject set.
-/// ARGV: prefix, sid, token hex, subject, created, auth, seen, expires, `step_up`, baseline,
-/// `exp_ms`, origin or `''`.
+/// KEYS: session, token, token set, expiry index. ARGV: bucket prefix, sid, token hex, subject,
+/// created, auth, seen, expires, `step_up`, baseline, `exp_ms`, origin or `''`.
 static INSERT: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r"
@@ -65,20 +76,49 @@ redis.call('HSET', KEYS[1], 'subject', ARGV[4], 'created', ARGV[5], 'auth', ARGV
 if ARGV[12] ~= '' then redis.call('HSET', KEYS[1], 'origin', ARGV[12]) end
 redis.call('HSET', KEYS[2], 'sid', ARGV[2], 'seq', 1, 'issued', ARGV[5])
 redis.call('ZADD', KEYS[3], 1, ARGV[3])
-redis.call('SADD', KEYS[4], ARGV[2])
-redis.call('ZADD', P .. 'x', ARGV[8], ARGV[2])
+redis.call('ZADD', KEYS[4], ARGV[8], ARGV[2])
 redis.call('ZADD', P .. 'i', ARGV[7], ARGV[2])
 redis.call('PEXPIREAT', KEYS[1], ARGV[11])
 redis.call('PEXPIREAT', KEYS[2], ARGV[11])
 redis.call('PEXPIREAT', KEYS[3], ARGV[11])
-local pt = redis.call('PEXPIRETIME', KEYS[4])
-if pt == -1 or pt < tonumber(ARGV[11]) then redis.call('PEXPIREAT', KEYS[4], ARGV[11]) end
 return 1
 ",
     )
 });
 
-/// KEYS: token. ARGV: prefix.
+/// KEYS: subject set. ARGV: sid, `exp_ms`. Adds a session to the set and keeps the set alive
+/// until the latest member expires.
+static INDEX_ADD: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r"
+redis.call('SADD', KEYS[1], ARGV[1])
+local pt = redis.call('PEXPIRETIME', KEYS[1])
+if pt == -1 or pt < tonumber(ARGV[2]) then redis.call('PEXPIREAT', KEYS[1], ARGV[2]) end
+return 1
+",
+    )
+});
+
+/// KEYS: subject set, revoking set. Moves every member of the subject set into the revoking set
+/// (keeping the later expiry) and returns the revoking set's members, which includes any a
+/// crashed revoke left behind.
+static INDEX_MOVE: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r"
+local pt = redis.call('PEXPIRETIME', KEYS[1])
+if pt ~= -2 then
+  local cur = redis.call('PEXPIRETIME', KEYS[2])
+  redis.call('SUNIONSTORE', KEYS[2], KEYS[2], KEYS[1])
+  local at = math.max(pt, cur)
+  if at > 0 then redis.call('PEXPIREAT', KEYS[2], at) end
+  redis.call('DEL', KEYS[1])
+end
+return redis.call('SMEMBERS', KEYS[2])
+",
+    )
+});
+
+/// KEYS: token. ARGV: bucket prefix.
 static FIND: LazyLock<Script> = LazyLock::new(|| {
     Script::new(concat!(
         lua_helpers!(),
@@ -104,8 +144,15 @@ return rec
     ))
 });
 
-/// KEYS: session.
-/// ARGV: prefix, sid, now, supersede mode (`''` for no rotation), mode argument, new token hex,
+/// KEYS: session. ARGV: bucket prefix, sid.
+static READ: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(concat!(
+        lua_helpers!(),
+        "return read_session(ARGV[1], ARGV[2]) or false\n"
+    ))
+});
+
+/// KEYS: session. ARGV: bucket prefix, sid, now, supersede mode (`''` for no rotation), mode argument, new token hex,
 /// prune cutoff, `mark_used` hex or `''`, baseline or `''`, `step_up` or `''`, auth or `''`.
 static APPLY: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
@@ -165,47 +212,19 @@ return rotated
     )
 });
 
-/// ARGV: prefix, sid.
-static DELETE: LazyLock<Script> =
-    LazyLock::new(|| Script::new(concat!(lua_helpers!(), "return del_session(ARGV[1], ARGV[2])\n")));
-
-/// KEYS: subject set. ARGV: prefix.
-static DELETE_SUBJECT: LazyLock<Script> = LazyLock::new(|| {
+/// KEYS: session. ARGV: bucket prefix, sid, expected subject (optional). Returns the deleted
+/// session's subject, or nothing when it did not exist or belongs to another subject.
+static DELETE: LazyLock<Script> = LazyLock::new(|| {
     Script::new(concat!(
         lua_helpers!(),
         r"
-local out = {}
-for _, sid in ipairs(redis.call('SMEMBERS', KEYS[1])) do
-  if del_session(ARGV[1], sid) == 1 then
-    out[#out + 1] = sid
-  end
-end
-redis.call('DEL', KEYS[1])
-return out
+if ARGV[3] and redis.call('HGET', KEYS[1], 'subject') ~= ARGV[3] then return false end
+return del_session(ARGV[1], ARGV[2])
 ",
     ))
 });
 
-/// KEYS: subject set. ARGV: prefix.
-static LIST_SUBJECT: LazyLock<Script> = LazyLock::new(|| {
-    Script::new(concat!(
-        lua_helpers!(),
-        r"
-local out = {}
-for _, sid in ipairs(redis.call('SMEMBERS', KEYS[1])) do
-  local rec = read_session(ARGV[1], sid)
-  if rec then
-    out[#out + 1] = rec
-  else
-    redis.call('SREM', KEYS[1], sid)
-  end
-end
-return out
-",
-    ))
-});
-
-/// ARGV: prefix, now, idle cutoff, batch size.
+/// KEYS: expiry index. ARGV: bucket prefix, now, idle cutoff, batch size.
 static DELETE_EXPIRED: LazyLock<Script> = LazyLock::new(|| {
     Script::new(concat!(
         lua_helpers!(),
@@ -215,14 +234,16 @@ local found, n = 0, 0
 for _, idx in ipairs({{'x', ARGV[2]}, {'i', ARGV[3]}}) do
   local ids = redis.call('ZRANGEBYSCORE', P .. idx[1], '-inf', idx[2], 'LIMIT', 0, ARGV[4])
   found = found + #ids
-  for _, sid in ipairs(ids) do n = n + del_session(P, sid) end
+  for _, sid in ipairs(ids) do
+    if del_session(P, sid) then n = n + 1 end
+  end
 end
 return {n, found}
 ",
     ))
 });
 
-/// KEYS: events, claim index. ARGV: prefix, cutoff.
+/// KEYS: events, claim index. ARGV: bucket prefix, cutoff.
 static DELETE_EVENTS: LazyLock<Script> = LazyLock::new(|| {
     Script::new(
         r"
@@ -250,30 +271,87 @@ return 1
     )
 });
 
-/// A [`SessionStore`] on Valkey or Redis.
+/// Standalone or cluster connection behind one type, so the store has a single code path.
+#[derive(Clone)]
+enum Conn {
+    Standalone(ConnectionManager),
+    Cluster(ClusterConnection),
+}
+
+impl ConnectionLike for Conn {
+    fn req_packed_command<'a>(&'a mut self, cmd: &'a redis::Cmd) -> RedisFuture<'a, Value> {
+        match self {
+            Self::Standalone(conn) => conn.req_packed_command(cmd),
+            Self::Cluster(conn) => conn.req_packed_command(cmd),
+        }
+    }
+
+    fn req_packed_commands<'a>(
+        &'a mut self,
+        pipeline: &'a redis::Pipeline,
+        offset: usize,
+        count: usize,
+    ) -> RedisFuture<'a, Vec<Value>> {
+        match self {
+            Self::Standalone(conn) => conn.req_packed_commands(pipeline, offset, count),
+            Self::Cluster(conn) => conn.req_packed_commands(pipeline, offset, count),
+        }
+    }
+
+    fn get_db(&self) -> i64 {
+        match self {
+            Self::Standalone(conn) => conn.get_db(),
+            Self::Cluster(conn) => conn.get_db(),
+        }
+    }
+}
+
+/// A [`SessionStore`] on Valkey or Redis, standalone or Cluster.
 ///
 /// Every write that touches more than one key runs as a Lua script, so it is atomic across any
-/// number of processes sharing the server. Requires Valkey 7.2+ or Redis 7.0+ in standalone or
-/// primary/replica mode; Cluster is not supported because the scripts derive key names from
-/// stored data.
+/// number of processes sharing the server. Requires Valkey 7.2+ or Redis 7.0+.
+///
+/// # Cluster
+///
+/// Connect with [`connect_cluster`](Self::connect_cluster) or
+/// [`from_cluster`](Self::from_cluster). Keys are split into 256 fixed buckets, and every key
+/// carries its bucket as a hash tag (`{bb}`), so a session, its tokens and its indexes always
+/// live in one hash slot and each script runs on one node. The bucket is the last byte of the
+/// session id, the first byte of a token's hash, or the first byte of the SHA-256 of a subject.
+/// [`Guard`](crate::Guard) mines tokens so that a session's tokens share its bucket; the store
+/// rejects writes where they do not.
+///
+/// The subject index is the one structure that spans buckets: a session id sits in its subject's
+/// set while the session lives in its own bucket, so subject-wide operations are eventually
+/// consistent. [`delete_subject_sessions`](SessionStore::delete_subject_sessions) moves the set
+/// aside, deletes each session in its bucket and then drops the moved ids. If the caller
+/// crashes in between, the leftover ids stay pending and the next revoke for the subject
+/// finishes them. A session created while a revoke runs is either revoked or its creator gets an
+/// error and the session is removed. [`list_subject_sessions`](SessionStore::list_subject_sessions)
+/// includes sessions that are mid-revoke.
+///
+/// [`delete_expired`](SessionStore::delete_expired) and
+/// [`delete_events_before`](SessionStore::delete_events_before) visit all 256 buckets.
 ///
 /// # Data layout
 ///
-/// All keys start with the [key prefix](Self::key_prefix) (`P`, default `sg:`).
-/// Timestamps are microseconds since the Unix epoch as decimal integers.
+/// All keys start with the [key prefix](Self::key_prefix) followed by the bucket tag, written
+/// `B` here (for example `sg:{0a}:`). Timestamps are microseconds since the Unix epoch as
+/// decimal integers.
 ///
 /// | Key | Type | Contents |
 /// |-----|------|----------|
-/// | `P s:{session id}` | hash | `subject`, `created`, `auth`, `seen`, `expires`, `step_up`, `baseline` (JSON), `origin` (JSON, absent before 0.2), `cur` (current token), `seq` (token counter), `exp_ms` |
-/// | `P t:{token hash hex}` | hash | `sid`, `seq` (issue order), `issued`, `used`, `sup` (superseded) |
-/// | `P k:{session id}` | sorted set | the session's token hashes, scored by `seq` |
-/// | `P u:{subject}` | set | session ids of a subject |
-/// | `P x` | sorted set | session ids scored by `expires_at` |
-/// | `P i` | sorted set | session ids scored by `last_seen_at` |
-/// | `P e` | sorted set | events as JSON, scored by `at` |
-/// | `P c:{session id}:{kind}` | string | time of the last session event claim |
-/// | `P c:s:{subject}:{kind}` | string | time of the last subject alert claim |
-/// | `P cz` | sorted set | `{session id}:{kind}` and `s:{subject}:{kind}` claims scored by claim time |
+/// | `B s:{session id}` | hash | `subject`, `created`, `auth`, `seen`, `expires`, `step_up`, `baseline` (JSON), `origin` (JSON, absent before 0.2), `cur` (current token), `seq` (token counter), `exp_ms` |
+/// | `B t:{token hash hex}` | hash | `sid`, `seq` (issue order), `issued`, `used`, `sup` (superseded) |
+/// | `B k:{session id}` | sorted set | the session's token hashes, scored by `seq` |
+/// | `B u:{subject}` | set | session ids of a subject (in the subject's bucket) |
+/// | `B ur:{subject}` | set | ids of a subject being revoked (in the subject's bucket) |
+/// | `B x` | sorted set | session ids scored by `expires_at` |
+/// | `B i` | sorted set | session ids scored by `last_seen_at` |
+/// | `B e` | sorted set | events as JSON, scored by `at` |
+/// | `B c:{session id}:{kind}` | string | time of the last session event claim |
+/// | `B c:s:{subject}:{kind}` | string | time of the last subject alert claim (subject's bucket) |
+/// | `B cz` | sorted set | `{session id}:{kind}` and `s:{subject}:{kind}` claims scored by claim time |
 ///
 /// Session, token and per-session token-set keys expire at the session's absolute expiry and
 /// subject sets at their last session's expiry, so Valkey cleans up even if
@@ -286,7 +364,7 @@ return 1
 /// Cheap to clone; clones share the connection.
 #[derive(Clone)]
 pub struct ValkeyStore {
-    conn: ConnectionManager,
+    conn: Conn,
     prefix: String,
 }
 
@@ -302,9 +380,30 @@ impl ValkeyStore {
     /// A store on an existing connection, with the default key prefix `sg:`.
     pub fn new(conn: ConnectionManager) -> Self {
         Self {
-            conn,
+            conn: Conn::Standalone(conn),
             prefix: "sg:".to_owned(),
         }
+    }
+
+    /// A store on an existing Cluster connection, with the default key prefix `sg:`.
+    pub fn from_cluster(conn: ClusterConnection) -> Self {
+        Self {
+            conn: Conn::Cluster(conn),
+            prefix: "sg:".to_owned(),
+        }
+    }
+
+    /// Connects to a Valkey or Redis Cluster through any of its nodes (`redis://`, `rediss://`
+    /// or `valkey://` URLs), with the default key prefix `sg:`.
+    ///
+    /// # Errors
+    ///
+    /// If a URL is invalid or no node is reachable.
+    pub async fn connect_cluster<T: redis::IntoConnectionInfo>(
+        nodes: impl IntoIterator<Item = T>,
+    ) -> Result<Self, redis::RedisError> {
+        let client = redis::cluster::ClusterClient::new(nodes)?;
+        Ok(Self::from_cluster(client.get_async_connection().await?))
     }
 
     /// Connects to `url` (`redis://`, `rediss://` or `valkey://`), with the default key prefix
@@ -320,18 +419,65 @@ impl ValkeyStore {
 
     /// Prefixes every key with `prefix`, so several apps can share one server. Defaults to
     /// `sg:`.
+    ///
+    /// # Panics
+    ///
+    /// If `prefix` contains `{` or `}`: the store puts its own hash tag after the prefix, and a
+    /// brace in the prefix would change which slot keys land in.
     #[must_use]
     pub fn key_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.prefix = prefix.into();
+        let prefix = prefix.into();
+        assert!(
+            !prefix.contains(['{', '}']),
+            "ValkeyStore key prefix must not contain '{{' or '}}'"
+        );
+        self.prefix = prefix;
         self
     }
 
-    fn key(&self, kind: &str, id: &str) -> String {
-        format!("{}{kind}:{id}", self.prefix)
+    /// `prefix{bb}:`, the start of every key in `bucket`.
+    fn bucket_prefix(&self, bucket: u8) -> String {
+        format!("{}{{{bucket:02x}}}:", self.prefix)
     }
 
-    fn conn(&self) -> ConnectionManager {
+    /// A key `kind:id` in `bucket`.
+    fn key(&self, bucket: u8, kind: &str, id: &str) -> String {
+        format!("{}{kind}:{id}", self.bucket_prefix(bucket))
+    }
+
+    /// A singleton key `kind` in `bucket`.
+    fn plain_key(&self, bucket: u8, kind: &str) -> String {
+        format!("{}{kind}", self.bucket_prefix(bucket))
+    }
+
+    fn conn(&self) -> Conn {
         self.conn.clone()
+    }
+
+    /// Removes `session_id` from its subject's sets. Best effort: the sets also expire, and
+    /// readers tolerate ids of sessions that are gone.
+    async fn unindex(&self, subject: &str, session_id: Uuid) {
+        let bucket = subject_bucket(subject);
+        for kind in ["u", "ur"] {
+            let _removed: Result<i64, _> = redis::cmd("SREM")
+                .arg(self.key(bucket, kind, subject))
+                .arg(session_id.to_string())
+                .query_async(&mut self.conn())
+                .await;
+        }
+    }
+}
+
+/// The bucket of a subject's index sets: the first byte of the SHA-256 of its canonical JSON.
+fn subject_bucket(subject: &str) -> u8 {
+    Sha256::digest(subject.as_bytes())[0]
+}
+
+fn ensure_aligned(session_id: Uuid, token: &TokenHash) -> Result<(), StoreError> {
+    if session_bucket(session_id) == token_bucket(token) {
+        Ok(())
+    } else {
+        Err("valkey store: token and session id are in different buckets".into())
     }
 }
 
@@ -396,7 +542,13 @@ struct EventRow<'a> {
 }
 
 impl SessionStore for ValkeyStore {
+    fn sharded(&self) -> bool {
+        true
+    }
+
     async fn insert_session(&self, session: &SessionRecord, token: &TokenHash) -> Result<(), StoreError> {
+        ensure_aligned(session.id, token)?;
+        let bucket = session_bucket(session.id);
         let sid = session.id.to_string();
         let hex = token.to_hex();
         let exp_ms = session
@@ -404,12 +556,20 @@ impl SessionStore for ValkeyStore {
             .timestamp_micros()
             .saturating_add(999)
             .div_euclid(1000);
+        // Index first: a concurrent revoke then either sees the id or makes the check below fail.
+        let sbucket = subject_bucket(&session.subject);
+        let _: i64 = INDEX_ADD
+            .key(self.key(sbucket, "u", &session.subject))
+            .arg(&sid)
+            .arg(exp_ms)
+            .invoke_async(&mut self.conn())
+            .await?;
         let inserted: i64 = INSERT
-            .key(self.key("s", &sid))
-            .key(self.key("t", &hex))
-            .key(self.key("k", &sid))
-            .key(self.key("u", &session.subject))
-            .arg(&self.prefix)
+            .key(self.key(bucket, "s", &sid))
+            .key(self.key(bucket, "t", &hex))
+            .key(self.key(bucket, "k", &sid))
+            .key(self.plain_key(bucket, "x"))
+            .arg(self.bucket_prefix(bucket))
             .arg(&sid)
             .arg(&hex)
             .arg(&session.subject)
@@ -426,17 +586,34 @@ impl SessionStore for ValkeyStore {
             })
             .invoke_async(&mut self.conn())
             .await?;
-        if inserted == 1 {
-            Ok(())
-        } else {
-            Err("duplicate session id or token".into())
+        if inserted != 1 {
+            return Err("duplicate session id or token".into());
         }
+        let indexed: bool = redis::cmd("SISMEMBER")
+            .arg(self.key(sbucket, "u", &session.subject))
+            .arg(&sid)
+            .query_async(&mut self.conn())
+            .await?;
+        if !indexed {
+            let exists: bool = redis::cmd("EXISTS")
+                .arg(self.key(bucket, "s", &sid))
+                .query_async(&mut self.conn())
+                .await?;
+            if exists {
+                // A revoke moved the index entry between our two writes; do not leave a session
+                // the revoke can no longer find.
+                self.delete_session(session.id).await?;
+                return Err("valkey store: subject was revoked while the session was created".into());
+            }
+        }
+        Ok(())
     }
 
     async fn find_by_token(&self, token: &TokenHash) -> Result<Option<TokenLookup>, StoreError> {
+        let bucket = token_bucket(token);
         let fields: Option<Vec<String>> = FIND
-            .key(self.key("t", &token.to_hex()))
-            .arg(&self.prefix)
+            .key(self.key(bucket, "t", &token.to_hex()))
+            .arg(self.bucket_prefix(bucket))
             .invoke_async(&mut self.conn())
             .await?;
         let Some(fields) = fields else {
@@ -458,6 +635,13 @@ impl SessionStore for ValkeyStore {
     }
 
     async fn apply(&self, update: &SessionUpdate) -> Result<bool, StoreError> {
+        if let Some(rotation) = &update.rotation {
+            ensure_aligned(update.session_id, &rotation.new_token)?;
+        }
+        if let Some(used) = &update.mark_used {
+            ensure_aligned(update.session_id, used)?;
+        }
+        let bucket = session_bucket(update.session_id);
         let sid = update.session_id.to_string();
         let (mode, mode_arg, new_token, prune) = match &update.rotation {
             None => ("", String::new(), String::new(), String::new()),
@@ -485,8 +669,8 @@ impl SessionStore for ValkeyStore {
             None => "",
         };
         let rotated: i64 = APPLY
-            .key(self.key("s", &sid))
-            .arg(&self.prefix)
+            .key(self.key(bucket, "s", &sid))
+            .arg(self.bucket_prefix(bucket))
             .arg(&sid)
             .arg(micros(update.now))
             .arg(mode)
@@ -503,47 +687,115 @@ impl SessionStore for ValkeyStore {
     }
 
     async fn delete_session(&self, session_id: Uuid) -> Result<bool, StoreError> {
-        let deleted: i64 = DELETE
-            .arg(&self.prefix)
-            .arg(session_id.to_string())
+        let bucket = session_bucket(session_id);
+        let sid = session_id.to_string();
+        let subject: Option<String> = DELETE
+            .key(self.key(bucket, "s", &sid))
+            .arg(self.bucket_prefix(bucket))
+            .arg(&sid)
             .invoke_async(&mut self.conn())
             .await?;
-        Ok(deleted == 1)
+        let Some(subject) = subject else {
+            return Ok(false);
+        };
+        self.unindex(&subject, session_id).await;
+        Ok(true)
     }
 
     async fn delete_subject_sessions(&self, subject: &str) -> Result<Vec<Uuid>, StoreError> {
-        let deleted: Vec<String> = DELETE_SUBJECT
-            .key(self.key("u", subject))
-            .arg(&self.prefix)
+        let sbucket = subject_bucket(subject);
+        let revoking = self.key(sbucket, "ur", subject);
+        let members: Vec<String> = INDEX_MOVE
+            .key(self.key(sbucket, "u", subject))
+            .key(&revoking)
             .invoke_async(&mut self.conn())
             .await?;
-        Ok(deleted.iter().map(|id| Uuid::parse_str(id)).collect::<Result<_, _>>()?)
+        let mut deleted = Vec::new();
+        for member in &members {
+            // A malformed member can't name a session; the SREM below clears it.
+            let Ok(id) = Uuid::parse_str(member) else { continue };
+            let bucket = session_bucket(id);
+            let removed: Option<String> = DELETE
+                .key(self.key(bucket, "s", member))
+                .arg(self.bucket_prefix(bucket))
+                .arg(member)
+                .arg(subject)
+                .invoke_async(&mut self.conn())
+                .await?;
+            if removed.is_some() {
+                deleted.push(id);
+            }
+        }
+        // Only now are the ids done; a failure above leaves them pending for the next revoke.
+        for chunk in members.chunks(SREM_BATCH) {
+            let _removed: i64 = redis::cmd("SREM")
+                .arg(&revoking)
+                .arg(chunk)
+                .query_async(&mut self.conn())
+                .await?;
+        }
+        Ok(deleted)
     }
 
     async fn list_subject_sessions(&self, subject: &str) -> Result<Vec<SessionRecord>, StoreError> {
-        let rows: Vec<Vec<String>> = LIST_SUBJECT
-            .key(self.key("u", subject))
-            .arg(&self.prefix)
-            .invoke_async(&mut self.conn())
+        let sbucket = subject_bucket(subject);
+        let members: Vec<String> = redis::cmd("SUNION")
+            .arg(self.key(sbucket, "u", subject))
+            .arg(self.key(sbucket, "ur", subject))
+            .query_async(&mut self.conn())
             .await?;
-        rows.iter().map(|row| parse_session(row)).collect()
+        let mut sessions = Vec::with_capacity(members.len());
+        let mut stale = Vec::new();
+        for member in &members {
+            let Ok(id) = Uuid::parse_str(member) else {
+                stale.push(member);
+                continue;
+            };
+            let bucket = session_bucket(id);
+            let fields: Option<Vec<String>> = READ
+                .key(self.key(bucket, "s", member))
+                .arg(self.bucket_prefix(bucket))
+                .arg(member)
+                .invoke_async(&mut self.conn())
+                .await?;
+            match fields.map(|fields| parse_session(&fields)).transpose()? {
+                Some(record) if record.subject == subject => sessions.push(record),
+                _ => stale.push(member),
+            }
+        }
+        // Expired sessions leave their ids behind. Dropping one that a creator has added but
+        // not yet inserted is safe: the creator's membership check then fails the login.
+        for chunk in stale.chunks(SREM_BATCH) {
+            for kind in ["u", "ur"] {
+                let _removed: Result<i64, _> = redis::cmd("SREM")
+                    .arg(self.key(sbucket, kind, subject))
+                    .arg(chunk)
+                    .query_async(&mut self.conn())
+                    .await;
+            }
+        }
+        Ok(sessions)
     }
 
     async fn delete_expired(&self, now: DateTime<Utc>, idle_cutoff: DateTime<Utc>) -> Result<u64, StoreError> {
         let mut total = 0;
-        loop {
-            let (deleted, found): (u64, u64) = DELETE_EXPIRED
-                .arg(&self.prefix)
-                .arg(micros(now))
-                .arg(micros(idle_cutoff))
-                .arg(PURGE_BATCH)
-                .invoke_async(&mut self.conn())
-                .await?;
-            total += deleted;
-            if found == 0 {
-                return Ok(total);
+        for bucket in 0..=u8::MAX {
+            loop {
+                let (deleted, found): (u64, u64) = DELETE_EXPIRED
+                    .key(self.plain_key(bucket, "x"))
+                    .arg(self.bucket_prefix(bucket))
+                    .arg(micros(now))
+                    .arg(micros(idle_cutoff))
+                    .arg(PURGE_BATCH)
+                    .invoke_async(&mut self.conn())
+                    .await?;
+                total += deleted;
+                if found == 0 {
+                    break;
+                }
             }
         }
+        Ok(total)
     }
 
     async fn record_event(&self, event: &SessionEvent) -> Result<(), StoreError> {
@@ -561,7 +813,7 @@ impl SessionStore for ValkeyStore {
             at: event.at,
         };
         let _added: i64 = redis::cmd("ZADD")
-            .arg(format!("{}e", self.prefix))
+            .arg(self.plain_key(session_bucket(event.session_id), "e"))
             .arg(event.at.timestamp_micros())
             .arg(serde_json::to_string(&row)?)
             .query_async(&mut self.conn())
@@ -570,14 +822,18 @@ impl SessionStore for ValkeyStore {
     }
 
     async fn delete_events_before(&self, cutoff: DateTime<Utc>) -> Result<u64, StoreError> {
-        let deleted: u64 = DELETE_EVENTS
-            .key(format!("{}e", self.prefix))
-            .key(format!("{}cz", self.prefix))
-            .arg(&self.prefix)
-            .arg(micros(cutoff))
-            .invoke_async(&mut self.conn())
-            .await?;
-        Ok(deleted)
+        let mut total = 0;
+        for bucket in 0..=u8::MAX {
+            let deleted: u64 = DELETE_EVENTS
+                .key(self.plain_key(bucket, "e"))
+                .key(self.plain_key(bucket, "cz"))
+                .arg(self.bucket_prefix(bucket))
+                .arg(micros(cutoff))
+                .invoke_async(&mut self.conn())
+                .await?;
+            total += deleted;
+        }
+        Ok(total)
     }
 
     async fn claim_event(
@@ -588,15 +844,15 @@ impl SessionStore for ValkeyStore {
         window: TimeDelta,
     ) -> Result<bool, StoreError> {
         // A session id never starts with `s:`, and no kind contains `:`, so members are unique.
-        let member = match scope {
-            ClaimScope::Session(session_id) => format!("{session_id}:{kind}"),
-            ClaimScope::Subject(subject) => format!("s:{subject}:{kind}"),
+        let (bucket, member) = match scope {
+            ClaimScope::Session(session_id) => (session_bucket(session_id), format!("{session_id}:{kind}")),
+            ClaimScope::Subject(subject) => (subject_bucket(subject), format!("s:{subject}:{kind}")),
         };
         let micros_window = window.num_microseconds().unwrap_or(i64::MAX);
         let millis_window = window.num_milliseconds().max(1);
         let claimed: i64 = CLAIM
-            .key(self.key("c", &member))
-            .key(format!("{}cz", self.prefix))
+            .key(self.key(bucket, "c", &member))
+            .key(self.plain_key(bucket, "cz"))
             .arg(micros(now))
             .arg(micros_window)
             .arg(millis_window)
