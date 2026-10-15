@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       # The version is bumped after merge from the PR's release label, so check
       # against the level that label will release instead of Cargo.toml's version.

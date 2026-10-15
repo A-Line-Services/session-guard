@@ -20,9 +20,7 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  pull-requests: read
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,12 +29,15 @@ jobs:
   check-changes:
     name: Check for Changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       has_changes: ${{ steps.check.outputs.has_changes }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check for changes since last release
         id: check
@@ -88,6 +89,9 @@ jobs:
     needs: check-changes
     if: needs.check-changes.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
     outputs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
@@ -106,6 +110,8 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ steps.get_token.outputs.token }}
+          # release-pilot pushes the release commit and tag with this token.
+          persist-credentials: true
 
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
