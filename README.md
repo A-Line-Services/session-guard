@@ -84,7 +84,7 @@ With several instances, unenforced events are deduplicated per session and kind,
 
 ```toml
 [dependencies]
-session-guard = { version = "0.2", features = ["axum", "postgres"] }
+session-guard = { version = "0.3", features = ["axum", "postgres"] }
 ```
 
 ```rust,no_run
