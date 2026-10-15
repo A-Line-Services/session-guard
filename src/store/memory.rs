@@ -326,4 +326,35 @@ mod tests {
         );
         assert_eq!(store.session_count(), 1);
     }
+
+    #[tokio::test]
+    async fn sharded_double_records_misaligned_writes() {
+        use crate::{
+            Rotation, SessionUpdate, Supersede, TokenHash,
+            store::{SessionStore, token_bucket},
+            testing,
+        };
+        let store = MemoryStore::sharded();
+        let now = testing::now_secs();
+        let session = testing::sample_session(now);
+        let bucket = crate::store::session_bucket(session.id);
+        let mut bytes = *testing::random_hash().as_bytes();
+        bytes[0] = bucket.wrapping_add(1);
+        let off = TokenHash::from_bytes(bytes);
+        assert_ne!(token_bucket(&off), bucket);
+
+        store.insert_session(&session, &off).await.unwrap();
+        assert_eq!(store.misaligned(), [session.id]);
+
+        let update = SessionUpdate {
+            rotation: Some(Rotation {
+                new_token: off,
+                supersede: Supersede::Current,
+                prune_superseded_before: now,
+            }),
+            ..SessionUpdate::touch(session.id, now)
+        };
+        store.apply(&update).await.unwrap();
+        assert_eq!(store.misaligned(), [session.id, session.id]);
+    }
 }
