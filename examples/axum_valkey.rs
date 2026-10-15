@@ -10,6 +10,8 @@
 //! Environment:
 //!
 //! * `VALKEY_URL`: default `redis://localhost:6379`
+//! * `VALKEY_CLUSTER_URLS`: comma-separated seed nodes of a Valkey Cluster, used instead of
+//!   `VALKEY_URL` when set
 //! * `LISTEN`: address to bind, default `127.0.0.1:3000`
 //!
 //! The app itself is in `app/`, shared by the three examples.
@@ -24,8 +26,12 @@ type Store = session_guard::ValkeyStore;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     app::init_tracing();
-    let url = std::env::var("VALKEY_URL").unwrap_or_else(|_| "redis://localhost:6379".to_owned());
-    let store = Store::connect(&url).await?;
+    let store = if let Ok(nodes) = std::env::var("VALKEY_CLUSTER_URLS") {
+        Store::connect_cluster(nodes.split(',').map(str::trim)).await?
+    } else {
+        let url = std::env::var("VALKEY_URL").unwrap_or_else(|_| "redis://localhost:6379".to_owned());
+        Store::connect(&url).await?
+    };
 
     app::serve(store).await
 }

@@ -1595,3 +1595,28 @@ async fn tokens_without_the_prefix_are_rejected() {
     assert!(!plain.guard.is_session_token(&token));
     assert!(plain.guard.is_session_token(bare));
 }
+
+// --- sharded stores ---
+
+/// Every id and token a sharded store sees must share one bucket; the store rejects the rest.
+#[tokio::test]
+async fn sharded_stores_get_aligned_ids_and_tokens() {
+    let store = Arc::new(MemoryStore::sharded());
+    let clock = ManualClock::new(start());
+    let guard = Guard::builder(Arc::clone(&store), GuardConfig::default())
+        .ip_intel(intel)
+        .clock(clock.clone())
+        .build();
+    for _ in 0..32 {
+        let new = guard.login(&Uuid::new_v4(), &home(), None).await.unwrap();
+        let mut token = new.token.expose().to_owned();
+        for _ in 0..3 {
+            clock.advance(mins(11));
+            let ok = authenticated(guard.authenticate(&token, &home()).await.unwrap());
+            if let Some(rotated) = ok.rotated {
+                token = rotated.expose().to_owned();
+            }
+        }
+    }
+    assert_eq!(store.misaligned().len(), 0);
+}

@@ -83,13 +83,23 @@ pub fn now_secs() -> DateTime<Utc> {
     DateTime::from_timestamp(now.timestamp(), 0).unwrap_or(now)
 }
 
-/// A fresh random token hash.
+/// A fresh random token hash in bucket 0, so it pairs with the sessions [`sample_session_for`]
+/// builds on [sharded](crate::SessionStore::sharded) stores.
 ///
 /// # Panics
 ///
 /// If the OS random number generator is unavailable.
 pub fn random_hash() -> TokenHash {
-    SessionToken::generate().expect("OS RNG").hash()
+    let mut bytes = *SessionToken::generate().expect("OS RNG").hash().as_bytes();
+    bytes[0] = 0;
+    TokenHash::from_bytes(bytes)
+}
+
+/// A random session id in bucket 0.
+fn aligned_session_id() -> Uuid {
+    let mut bytes = *Uuid::new_v4().as_bytes();
+    bytes[15] = 0;
+    Uuid::from_bytes(bytes)
 }
 
 /// A session for a random subject, created at `now`, expiring in a day.
@@ -100,7 +110,7 @@ pub fn sample_session(now: DateTime<Utc>) -> SessionRecord {
 /// A session for `subject` (canonical JSON), created at `now`, expiring in a day.
 pub fn sample_session_for(subject: &str, now: DateTime<Utc>) -> SessionRecord {
     SessionRecord {
-        id: Uuid::new_v4(),
+        id: aligned_session_id(),
         subject: subject.to_owned(),
         created_at: now,
         authenticated_at: now,
@@ -758,7 +768,11 @@ pub async fn subject_claims_dedupe_within_window<St: SessionStore>(store: St) {
 /// Updating a session that does not exist is not an error.
 pub async fn apply_to_missing_session<St: SessionStore>(store: St) {
     let now = now_secs();
-    let update = rotate(Uuid::new_v4(), now, rotation(random_hash(), Supersede::Current, now));
+    let update = rotate(
+        aligned_session_id(),
+        now,
+        rotation(random_hash(), Supersede::Current, now),
+    );
     assert!(!store.apply(&update).await.unwrap());
 }
 

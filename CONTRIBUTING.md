@@ -15,7 +15,7 @@ Recipes live in the [`justfile`](justfile) (run `just` to list them):
 | --------------- | ------------------------------------------------------------------- |
 | `just test`     | Unit, property, doc and in-memory store tests (no Docker).          |
 | `just test-all` | Everything, including Postgres/Valkey stores and e2e. Needs Docker (testcontainers). |
-| `just test-postgres` / `just test-valkey` / `just e2e` | One store suite or the end-to-end HTTP tests. Need Docker. |
+| `just test-postgres` / `just test-valkey` / `just test-valkey-cluster` / `just e2e` | One store suite or the end-to-end HTTP tests. Need Docker. |
 | `just test-clean` | Removes the Docker containers the store and e2e tests share. |
 | `just lint`     | `rustfmt --check` and clippy on all and no features.                |
 | `just hack`     | `cargo hack` over every pair of features.                           |
@@ -30,8 +30,14 @@ Recipes live in the [`justfile`](justfile) (run `just` to list them):
 The Postgres, Valkey and e2e tests start their servers with testcontainers, so
 Docker must be running. All tests share one container per image (labelled
 `session-guard.test`) and reuse it across runs; `just test-clean` removes them.
-Set `DATABASE_URL` and `VALKEY_URL` to use servers you already run instead
-(this is what CI does).
+Set `DATABASE_URL`, `VALKEY_URL` and `VALKEY_CLUSTER_URL` to use servers you
+already run instead (this is what CI does).
+
+The cluster tests start a single cluster-enabled node that owns every slot
+(host networking, port 7391). That catches every `CROSSSLOT` error, which the
+server raises per slot, but not redirects between nodes. CI therefore runs the
+same tests against a three-node cluster; to do that locally, start one and
+point `VALKEY_CLUSTER_URL` at it.
 
 ### MSRV
 

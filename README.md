@@ -209,7 +209,7 @@ Then open <http://127.0.0.1:3000/swagger> and log in with `demo` / `demo-passwor
 | `aide` | OpenAPI docs through aide and rovo: the `session_cookie` security scheme; enables `axum` |
 | `tokio` | `Guard::spawn_purge`, a background task that purges expired sessions |
 | `postgres` | `PgStore` on sqlx, with embedded migrations |
-| `valkey` | `ValkeyStore` for Valkey or Redis, with atomic Lua rotation (a single primary; Cluster mode is not supported) |
+| `valkey` | `ValkeyStore` for Valkey or Redis, with atomic Lua rotation, standalone or Valkey Cluster (`ValkeyStore::connect_cluster`) |
 | `maxmind` | `MaxMindIntel`: country, city, ASN, network name and anonymizers from GeoLite2 / GeoIP2 databases |
 | `metrics` | Counters through the `metrics` facade |
 | `testing` | The `store_conformance!` suite and helpers for custom stores |
@@ -220,7 +220,7 @@ No feature is enabled by default. `MemoryStore` is always available and meant fo
 
 session-guard manages sessions only. Your app owns login, password verification, rate limiting, session caps and any per-session payload.
 The subject is a generic opaque type `S: Subject` (anything serializable, comparable and cloneable; `Uuid` by default). It is stored as JSON, so use a deterministic serialization (no `HashMap`).
-There are no auth routes. A tower-sessions adapter and Valkey Cluster support are future work.
+There are no auth routes. A tower-sessions adapter is future work.
 
 **Your app MUST rate-limit its login and step-up endpoints.** The guard does not.
 
