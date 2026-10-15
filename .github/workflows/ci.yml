@@ -119,17 +119,30 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     # The tests start testcontainers by default, but use these services
-    # instead when DATABASE_URL / VALKEY_URL are set.
+    # instead when DATABASE_URL / VALKEY_URL / VALKEY_CLUSTER_URL are set.
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
       VALKEY_URL: redis://localhost:6379
+      VALKEY_CLUSTER_URL: redis://127.0.0.1:7000
     steps:
       - uses: actions/checkout@v7
+      # Three masters on the host network, so redirects between nodes are exercised.
+      - name: Start Valkey Cluster
+        run: |
+          for port in 7000 7001 7002; do
+            docker run -d --name "valkey-$port" --network host valkey/valkey:8 \
+              valkey-server --port "$port" --cluster-enabled yes \
+              --cluster-announce-ip 127.0.0.1 --cluster-config-file "/tmp/nodes-$port.conf" --save ''
+          done
+          sleep 3
+          docker exec valkey-7000 valkey-cli --cluster create \
+            127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 --cluster-replicas 0 --cluster-yes
+          until docker exec valkey-7000 valkey-cli -p 7000 cluster info | grep -q cluster_state:ok; do sleep 1; done
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo test --all-features --test postgres --test valkey --test e2e
+      - run: cargo test --all-features --test postgres --test valkey --test valkey_cluster --test e2e
 
   coverage:
     name: coverage

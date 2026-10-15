@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Production stores: `PgStore::migrated(pool).await?` (runs embedded migrations, safe from many processes; or `PgStore::migrator()` and `PgStore::new(pool)`) and `ValkeyStore` (a single primary, no Cluster). Call `guard.spawn_purge(every)` or `guard.purge_expired()` periodically.
+Production stores: `PgStore::migrated(pool).await?` (runs embedded migrations, safe from many processes; or `PgStore::migrator()` and `PgStore::new(pool)`) and `ValkeyStore` (standalone via `connect`, or Valkey Cluster via `connect_cluster`). Call `guard.spawn_purge(every)` or `guard.purge_expired()` periodically.
 
 ## Key concepts
 
