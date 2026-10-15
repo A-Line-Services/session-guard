@@ -1,5 +1,5 @@
 //! End-to-end tests: a real axum server on a loopback socket, driven over HTTP with reqwest,
-//! against both the Postgres and the Valkey store.
+//! against the Postgres store and the Valkey store, standalone and in cluster mode.
 //!
 //! The guard shares a [`ManualClock`] with the test, started at the real time because Valkey key
 //! TTLs follow the wall clock. The databases are shared with other test processes, so every
@@ -59,6 +59,13 @@ async fn valkey_store() -> ValkeyStore {
     ValkeyStore::connect(support::valkey_url().await)
         .await
         .expect("connect to valkey")
+        .key_prefix(format!("sgtest:e2e:{}:", Uuid::new_v4().simple()))
+}
+
+async fn valkey_cluster_store() -> ValkeyStore {
+    ValkeyStore::connect_cluster([support::valkey_cluster_url().await])
+        .await
+        .expect("connect to valkey cluster")
         .key_prefix(format!("sgtest:e2e:{}:", Uuid::new_v4().simple()))
 }
 
@@ -743,6 +750,15 @@ macro_rules! scenarios {
                 #[tokio::test(flavor = "multi_thread")]
                 async fn $name() {
                     super::$name(super::valkey_store().await).await;
+                }
+            )*
+        }
+
+        mod valkey_cluster {
+            $(
+                #[tokio::test(flavor = "multi_thread")]
+                async fn $name() {
+                    super::$name(super::valkey_cluster_store().await).await;
                 }
             )*
         }
