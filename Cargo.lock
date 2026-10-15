@@ -915,7 +915,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2379,9 +2379,9 @@ dependencies = [
 
 [[package]]
 name = "rovo"
-version = "0.4.13"
+version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fccde1e9f31325543fe3ab4124cd10f31f8111628df421c49b844286a264d4b1"
+checksum = "a80061e46ede653fcfbb33d0944af16ea344eed8ace0da13d972ffbe42c42d0d"
 dependencies = [
  "aide",
  "axum",
@@ -2394,9 +2394,9 @@ dependencies = [
 
 [[package]]
 name = "rovo-macros"
-version = "0.4.13"
+version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f11b21171005cca89d57e702a1372d89cb1e0f139026275974ec22851e94483d"
+checksum = "335f1a307ed1ce1c1b604b357a5dfb23ce5715c6276d5ae0a3daaa7725bb38e9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2431,7 +2431,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2611,11 +2611,11 @@ dependencies = [
 
 [[package]]
 name = "serde-saphyr"
-version = "1.3.0"
+version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
+checksum = "a253edfdea34032da21af84e16fcc94f4c7a6ba237f9f3bc2dbf43cea8535c44"
 dependencies = [
- "base64 0.23.1",
+ "base64 0.22.1",
  "nohash-hasher",
  "num-traits",
  "serde_core",
@@ -3169,7 +3169,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3770,7 +3770,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
