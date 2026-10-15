@@ -200,37 +200,34 @@ async fn logins_racing_a_revoke_are_revoked_or_rejected() {
         let subject = subject.clone();
         creators.push(tokio::spawn(async move {
             let (session, token) = in_bucket(&subject, i.wrapping_mul(5));
-            let inserted = store.insert_session(&session, &token).await.is_ok();
-            (session.id, token, inserted)
+            // Rejected or not, the session must not outlive the revoke. A rejected login may
+            // still be reported deleted: the revoke and the creator both clean up, either first.
+            let _ = store.insert_session(&session, &token).await;
+            (session.id, token)
         }));
     }
     let revoker = {
         let store = Arc::clone(&store);
         let subject = subject.clone();
         tokio::spawn(async move {
-            let mut deleted = HashSet::new();
             for _ in 0..8 {
-                deleted.extend(store.delete_subject_sessions(&subject).await.unwrap());
+                store.delete_subject_sessions(&subject).await.unwrap();
             }
-            deleted
         })
     };
     let mut created = Vec::new();
     for creator in creators {
         created.push(creator.await.unwrap());
     }
-    let mut deleted = revoker.await.unwrap();
+    revoker.await.unwrap();
 
     // Whatever survived the race is still reachable from the index, so a last revoke gets it.
-    deleted.extend(store.delete_subject_sessions(&subject).await.unwrap());
-    for (id, token, inserted) in created {
+    store.delete_subject_sessions(&subject).await.unwrap();
+    for (id, token) in created {
         assert!(
             store.find_by_token(&token).await.unwrap().is_none(),
             "{id} outlived the revoke"
         );
-        if !inserted {
-            assert!(!deleted.contains(&id), "{id} was rejected but also reported deleted");
-        }
     }
     assert_eq!(store.list_subject_sessions(&subject).await.unwrap().len(), 0);
 }
