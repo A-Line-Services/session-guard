@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-10-26
+
+### Chores
+
+- deps: update deps to prevent cert vuln ([#10](https://github.com/A-Line-Services/session-guard/pull/10)) by @Arthurdw
+- chore(deps): bump dtolnay/rust-toolchain from e2a55d2ffb04f378e9626c28d38b36d230d1e12f to 683b588c487a69d01f6c6ddf40f036ff682cc2c8 ([#9](https://github.com/A-Line-Services/session-guard/pull/9)) by @dependabot[bot]
+
 ## [0.3.0] - 2026-10-15
 
 ### Features
