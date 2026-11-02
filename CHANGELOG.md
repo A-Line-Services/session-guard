@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-11-02
+
+### Chores
+
+- chore(deps): bump rovo from 0.4.14 to 0.4.15 ([#14](https://github.com/A-Line-Services/session-guard/pull/14)) by @dependabot[bot]
+- chore(deps): bump taiki-e/install-action from 2.87.30 to 2.88.0 ([#15](https://github.com/A-Line-Services/session-guard/pull/15)) by @dependabot[bot]
+- chore(deps): bump Swatinem/rust-cache from 2.9.2 to 2.9.3 ([#11](https://github.com/A-Line-Services/session-guard/pull/11)) by @dependabot[bot]
+- fix: update to latest version ([#13](https://github.com/A-Line-Services/session-guard/pull/13)) by @Arthurdw
+- chore(deps): bump taiki-e/install-action from 2.87.28 to 2.87.30 ([#12](https://github.com/A-Line-Services/session-guard/pull/12)) by @dependabot[bot]
+
 ## [0.3.1] - 2026-10-26
 
 ### Chores
