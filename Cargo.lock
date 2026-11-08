@@ -2379,9 +2379,9 @@ dependencies = [
 
 [[package]]
 name = "rovo"
-version = "0.4.15"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e037b0a765af4fd80ae934c4c1e03cbd11f8e5b4f2fdb87c38c4cf0e467a5c4"
+checksum = "af061668adaf965a52cfbce2b412da5cbe95a2247ed87e594d8dc516a7e9c4cc"
 dependencies = [
  "aide",
  "axum",
@@ -2394,9 +2394,9 @@ dependencies = [
 
 [[package]]
 name = "rovo-macros"
-version = "0.4.15"
+version = "0.4.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bd670e5aa2ec4714f610f49333e129195c67289e1055f69dce2cd702b4bdd16"
+checksum = "d1ba068ce2cd34af499c7d63957d37b92bbea2897509399008360178f52c49b7"
 dependencies = [
  "proc-macro2",
  "quote",
