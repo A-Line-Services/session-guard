@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Bug Fixes
 
 - fix(guard): a request that raced an orphan reissue no longer revokes the session. When a rotation reply is lost and the client then sends several requests with the old token at once, the first gets the reissued token and the others used to count as token reuse. Now a repeat of the orphan within the rotation grace of its reissue, from the same network prefix and browser and OS family, is accepted without another reissue. Later replays, replays from elsewhere and replays of a token whose successor a client used still revoke.
+- fix(risk): missing client hints and a missing Accept-Language no longer score on the baseline's network prefix with the same browser and OS. WebSocket upgrades, `EventSource` and some fetches never send them, so a plain console session kept asking for step-up. Changed values still score, and off-network requests still count missing headers.
 - feat(store): `SessionStore::newer_used_tokens` (default `None`, unsupported: the guard keeps revoking on every reuse). Memory, Postgres and Valkey stores implement it; conformance check `newer_used_tokens_are_listed`.
 
 ## [0.3.2] - 2026-11-02

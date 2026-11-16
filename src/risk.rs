@@ -39,7 +39,9 @@ impl Assessment {
 /// Compares `current` against `baseline`.
 ///
 /// A value the baseline knows but the request lacks counts as a change: stripping headers
-/// never lowers the score. Values the baseline never had are not compared.
+/// never lowers the score. Values the baseline never had are not compared. The one exception:
+/// on the baseline's network prefix with the same browser and OS, missing client hints and a
+/// missing Accept-Language are not scored, since some request types never send them.
 pub fn assess(
     baseline: &Baseline,
     current: &Fingerprint,
@@ -49,6 +51,15 @@ pub fn assess(
 ) -> Assessment {
     let known = &baseline.fingerprint;
     let mut fired = Vec::with_capacity(4);
+    // Same network prefix and the same browser and OS: headers that some request types never
+    // send (client hints on WebSocket upgrades or EventSource, Accept-Language on bare fetches)
+    // are not news. Changed values still count, and a replayed token is caught by rotation.
+    let same_client = !current.ip_prefix.is_empty()
+        && known.ip_prefix == current.ip_prefix
+        && known.browser.is_some()
+        && known.browser == current.browser
+        && known.os.is_some()
+        && known.os == current.os;
 
     if let (Some(a), Some(b)) = (&known.os, &current.os)
         && !os_compatible(a, b)
@@ -76,8 +87,9 @@ pub fn assess(
         fired.push(Check::PlatformHintChanged);
     }
 
-    if lost(known.ch_platform.as_ref(), current.ch_platform.as_ref())
-        || lost(known.ch_mobile.as_ref(), current.ch_mobile.as_ref())
+    if !same_client
+        && (lost(known.ch_platform.as_ref(), current.ch_platform.as_ref())
+            || lost(known.ch_mobile.as_ref(), current.ch_mobile.as_ref()))
     {
         fired.push(Check::ClientHintsMissing);
     }
@@ -123,7 +135,8 @@ pub fn assess(
         fired.push(Check::TlsChanged);
     }
 
-    if differs(known.accept_language.as_ref(), current.accept_language.as_ref()) {
+    let language_dropped = current.accept_language.is_none();
+    if differs(known.accept_language.as_ref(), current.accept_language.as_ref()) && !(same_client && language_dropped) {
         fired.push(Check::AcceptLanguageChanged);
     }
 
@@ -318,18 +331,32 @@ mod tests {
     #[test]
     fn dropping_only_the_mobile_hint_is_noticed() {
         let mut current = chrome_on_windows();
+        current.ip_prefix = "198.51.100.0/24".to_owned();
         current.ch_mobile = None;
-        assert_eq!(decide(&current).1, vec![Check::ClientHintsMissing]);
+        assert_eq!(
+            decide(&current).1,
+            vec![Check::ClientHintsMissing, Check::IpPrefixChanged]
+        );
+    }
+
+    #[test]
+    fn missing_soft_headers_on_the_same_network_are_not_scored() {
+        let mut current = chrome_on_windows();
+        current.ch_platform = None;
+        current.ch_mobile = None;
+        current.accept_language = None;
+        assert_eq!(decide(&current).1, Vec::<Check>::new());
     }
 
     #[test]
     fn stripping_soft_headers_never_lowers_the_score() {
         let mut current = chrome_on_windows();
+        current.ip_prefix = "198.51.100.0/24".to_owned();
         current.accept_language = None;
         current.tls = None;
         assert_eq!(
             decide(&current).1,
-            vec![Check::TlsChanged, Check::AcceptLanguageChanged]
+            vec![Check::TlsChanged, Check::AcceptLanguageChanged, Check::IpPrefixChanged]
         );
 
         let mut current = chrome_on_windows();
