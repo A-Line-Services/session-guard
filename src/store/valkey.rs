@@ -118,6 +118,29 @@ return redis.call('SMEMBERS', KEYS[2])
     )
 });
 
+/// KEYS: token. ARGV: bucket prefix. Returns hex, issued, used and superseded (or `''`) of
+/// every used token issued after it in its session, oldest first.
+static NEWER_USED: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(
+        r"
+local P = ARGV[1]
+local t = redis.call('HMGET', KEYS[1], 'sid', 'seq')
+if not t[1] then return {} end
+local out = {}
+for _, hex in ipairs(redis.call('ZRANGEBYSCORE', P .. 'k:' .. t[1], '(' .. t[2], '+inf')) do
+  local n = redis.call('HMGET', P .. 't:' .. hex, 'issued', 'used', 'sup')
+  if n[2] then
+    out[#out + 1] = hex
+    out[#out + 1] = n[1]
+    out[#out + 1] = n[2]
+    out[#out + 1] = n[3] or ''
+  end
+end
+return out
+",
+    )
+});
+
 /// KEYS: token. ARGV: bucket prefix.
 static FIND: LazyLock<Script> = LazyLock::new(|| {
     Script::new(concat!(
@@ -632,6 +655,30 @@ impl SessionStore for ValkeyStore {
             },
             newer_token_used: newer == "1",
         }))
+    }
+
+    async fn newer_used_tokens(&self, token: &TokenHash) -> Result<Option<Vec<TokenRecord>>, StoreError> {
+        let bucket = token_bucket(token);
+        let fields: Vec<String> = NEWER_USED
+            .key(self.key(bucket, "t", &token.to_hex()))
+            .arg(self.bucket_prefix(bucket))
+            .invoke_async(&mut self.conn())
+            .await?;
+        let tokens = fields
+            .chunks(4)
+            .map(|record| {
+                let [hex, issued, used, superseded] = record else {
+                    return Err("valkey store: malformed newer token list".into());
+                };
+                Ok(TokenRecord {
+                    hash: TokenHash::from_hex(hex).ok_or("valkey store: malformed token hash")?,
+                    issued_at: parse_time(issued)?,
+                    first_used_at: parse_optional_time(used)?,
+                    superseded_at: parse_optional_time(superseded)?,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        Ok(Some(tokens))
     }
 
     async fn apply(&self, update: &SessionUpdate) -> Result<bool, StoreError> {

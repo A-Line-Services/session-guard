@@ -23,6 +23,11 @@ async fn store() -> ValkeyStore {
 
 session_guard::store_conformance!(store);
 
+#[tokio::test(flavor = "multi_thread")]
+async fn newer_used_tokens_are_supported() {
+    session_guard::testing::newer_used_tokens_are_supported(store().await).await;
+}
+
 // --- sharding ---
 
 use std::{collections::HashSet, sync::Arc};

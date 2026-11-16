@@ -450,6 +450,8 @@ async fn orphaned_token_is_reissued_only_once() {
         .rotated
         .unwrap();
 
+    // Past the reissued token's grace, so not a parallel request racing the reissue (see
+    // `orphan_burst`): the orphan is reuse.
     h.advance(mins(1));
     assert_eq!(
         rejected(h.guard.authenticate(&t0, &home()).await.unwrap()),
@@ -1620,3 +1622,7 @@ async fn sharded_stores_get_aligned_ids_and_tokens() {
     }
     assert_eq!(store.misaligned().len(), 0);
 }
+
+mod dual_stack;
+mod orphan_burst;
+mod same_network;

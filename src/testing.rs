@@ -53,6 +53,7 @@ macro_rules! store_conformance {
             rotation_if_issued_before,
             current_rotation,
             newer_token_used_is_tracked,
+            newer_used_tokens_are_listed,
             mark_used_sets_once,
             mark_used_reaches_the_rotated_token,
             none_fields_are_preserved,
@@ -205,6 +206,8 @@ pub async fn records_round_trip<St: SessionStore>(store: St) {
         },
         previous_ip_prefix: Some("198.51.100.0/24".into()),
         ip_changed_at: Some(now - secs(60)),
+        ipv4_prefix: Some("192.0.2.0/24".into()),
+        ipv6_prefix: Some("2001:db8:1::/48".into()),
     };
     session.origin = Some(SessionOrigin {
         at: now - secs(30),
@@ -413,6 +416,69 @@ pub async fn newer_token_used_is_tracked<St: SessionStore>(store: St) {
         .unwrap();
     assert!(store.find_by_token(&first).await.unwrap().unwrap().newer_token_used);
     assert!(!store.find_by_token(&second).await.unwrap().unwrap().newer_token_used);
+}
+
+/// `newer_used_tokens` lists the used tokens issued after the given one, oldest first. A store
+/// that returns `None` (the trait default, unsupported) passes; see
+/// [`newer_used_tokens_are_supported`] for the built-in stores.
+pub async fn newer_used_tokens_are_listed<St: SessionStore>(store: St) {
+    let now = now_secs();
+    let session = sample_session(now);
+    let first = random_hash();
+    store.insert_session(&session, &first).await.unwrap();
+    let Some(listed) = store.newer_used_tokens(&first).await.unwrap() else {
+        return;
+    };
+    assert_eq!(listed, Vec::new());
+    assert_eq!(store.newer_used_tokens(&random_hash()).await.unwrap(), Some(Vec::new()));
+
+    let second = random_hash();
+    let third = random_hash();
+    let fourth = random_hash();
+    for (offset, (old, new)) in [(1, (first, second)), (2, (second, third)), (3, (third, fourth))] {
+        store
+            .apply(&rotate(
+                session.id,
+                now + secs(offset),
+                rotation(new, Supersede::Exact(old), now),
+            ))
+            .await
+            .unwrap();
+    }
+    for (offset, token) in [(4, fourth), (5, second)] {
+        store
+            .apply(&SessionUpdate {
+                mark_used: Some(token),
+                ..SessionUpdate::touch(session.id, now + secs(offset))
+            })
+            .await
+            .unwrap();
+    }
+
+    let listed = store.newer_used_tokens(&first).await.unwrap().unwrap();
+    let summary: Vec<_> = listed
+        .iter()
+        .map(|t| (t.hash, t.issued_at, t.first_used_at, t.superseded_at))
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (second, now + secs(1), Some(now + secs(5)), Some(now + secs(2))),
+            (fourth, now + secs(3), Some(now + secs(4)), None),
+        ]
+    );
+    let listed = store.newer_used_tokens(&third).await.unwrap().unwrap();
+    assert_eq!(listed.iter().map(|t| t.hash).collect::<Vec<_>>(), vec![fourth]);
+    assert_eq!(store.newer_used_tokens(&fourth).await.unwrap(), Some(Vec::new()));
+}
+
+/// The store implements `newer_used_tokens` (all built-in stores do).
+pub async fn newer_used_tokens_are_supported<St: SessionStore>(store: St) {
+    let now = now_secs();
+    let session = sample_session(now);
+    let token = random_hash();
+    store.insert_session(&session, &token).await.unwrap();
+    assert_eq!(store.newer_used_tokens(&token).await.unwrap(), Some(Vec::new()));
 }
 
 /// `mark_used` sets `first_used_at` once and never moves it.
