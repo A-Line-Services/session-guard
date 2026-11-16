@@ -410,8 +410,10 @@ pub(crate) mod tests {
         assert_eq!(baseline.known_prefix("2001:db8:1::/48"), Some("2001:db8:1::/48"));
         assert_eq!(baseline.known_prefix("192.0.2.0/24"), None);
 
-        let mut v4 = Fingerprint::default();
-        v4.ip_prefix = "192.0.2.0/24".to_owned();
+        let v4 = Fingerprint {
+            ip_prefix: "192.0.2.0/24".to_owned(),
+            ..Fingerprint::default()
+        };
         baseline.absorb(&v4, Utc::now(), &Checks::default());
         assert_eq!(baseline.ipv6_prefix.as_deref(), Some("2001:db8:1::/48"));
         assert_eq!(baseline.ipv4_prefix.as_deref(), Some("192.0.2.0/24"));

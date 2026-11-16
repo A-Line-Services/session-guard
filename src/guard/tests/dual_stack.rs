@@ -1,4 +1,4 @@
-//! A dual-stack browser: happy eyeballs lands page loads, fetches and WebSockets on IPv4 or
+//! A dual-stack browser: happy eyeballs lands page loads, fetches and WebSocket connections on IPv4 or
 //! IPv6 at random, so one session alternates between a v4 /24 and a v6 /48 within seconds.
 //! Each family's network must be remembered on its own, and ping-pong only counts within a
 //! family.
