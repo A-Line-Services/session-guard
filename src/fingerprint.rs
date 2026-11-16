@@ -92,16 +92,60 @@ pub struct Baseline {
     pub previous_ip_prefix: Option<String>,
     /// When the client last moved network.
     pub ip_changed_at: Option<DateTime<Utc>>,
+    /// The client's known IPv4 /24. A dual-stack browser alternates between address families,
+    /// so each family's network is remembered on its own. Absent in baselines stored by 0.3.2
+    /// and earlier, where `fingerprint.ip_prefix` stands in for its family.
+    pub ipv4_prefix: Option<String>,
+    /// The client's known IPv6 /48; see `ipv4_prefix`.
+    pub ipv6_prefix: Option<String>,
 }
 
 impl Baseline {
     /// A fresh baseline, as set at login and after a completed step-up.
     pub fn new(fingerprint: Fingerprint) -> Self {
-        Self {
+        let mut baseline = Self {
             fingerprint,
             previous_ip_prefix: None,
             ip_changed_at: None,
+            ipv4_prefix: None,
+            ipv6_prefix: None,
+        };
+        let prefix = baseline.fingerprint.ip_prefix.clone();
+        baseline.remember_prefix(&prefix);
+        baseline
+    }
+
+    /// A fresh baseline for `fingerprint` that keeps the network known for the other address
+    /// family, as after a completed step-up from a dual-stack client.
+    #[must_use]
+    pub fn renewed(&self, fingerprint: Fingerprint) -> Self {
+        let mut renewed = Self::new(fingerprint);
+        for prefix in [self.ipv4_prefix.as_deref(), self.ipv6_prefix.as_deref(), Some(self.fingerprint.ip_prefix.as_str())]
+            .into_iter()
+            .flatten()
+        {
+            if renewed.known_prefix(prefix).is_none() {
+                renewed.remember_prefix(prefix);
+            }
         }
+        renewed
+    }
+
+    /// The known network in `prefix`'s address family, if any.
+    pub fn known_prefix(&self, prefix: &str) -> Option<&str> {
+        let slot = if is_ipv6_prefix(prefix) { &self.ipv6_prefix } else { &self.ipv4_prefix };
+        slot.as_deref().or_else(|| {
+            let last = self.fingerprint.ip_prefix.as_str();
+            (!last.is_empty() && is_ipv6_prefix(last) == is_ipv6_prefix(prefix)).then_some(last)
+        })
+    }
+
+    fn remember_prefix(&mut self, prefix: &str) {
+        if prefix.is_empty() {
+            return;
+        }
+        let slot = if is_ipv6_prefix(prefix) { &mut self.ipv6_prefix } else { &mut self.ipv4_prefix };
+        *slot = Some(prefix.to_owned());
     }
 
     /// Learns soft signals from a request that was let through. Only signals that `checks`
@@ -110,12 +154,25 @@ impl Baseline {
     /// whether anything changed.
     pub fn absorb(&mut self, current: &Fingerprint, now: DateTime<Utc>, checks: &Checks) -> bool {
         let before = self.clone();
-        let fp = &mut self.fingerprint;
         let ip_scored = checks.scores(Check::IpPrefixChanged) || checks.scores(Check::IpPingPong);
-        if ip_scored && fp.ip_prefix != current.ip_prefix && !current.ip_prefix.is_empty() {
-            self.previous_ip_prefix = Some(std::mem::replace(&mut fp.ip_prefix, current.ip_prefix.clone()));
-            self.ip_changed_at = Some(now);
+        if ip_scored && !current.ip_prefix.is_empty() {
+            // Baselines stored before the per-family slots only know their last network.
+            let last = self.fingerprint.ip_prefix.clone();
+            if let Some(known) = self.known_prefix(&last).map(str::to_owned) {
+                self.remember_prefix(&known);
+            }
+            let known = self.known_prefix(&current.ip_prefix).map(str::to_owned);
+            if known.as_deref() != Some(current.ip_prefix.as_str()) {
+                // A move within the family; the first sighting of the other family is no move.
+                if known.is_some() {
+                    self.previous_ip_prefix = known;
+                    self.ip_changed_at = Some(now);
+                }
+                self.remember_prefix(&current.ip_prefix);
+            }
+            self.fingerprint.ip_prefix.clone_from(&current.ip_prefix);
         }
+        let fp = &mut self.fingerprint;
         if checks.scores(Check::CountryChanged) {
             keep_known(&mut fp.country, current.country.as_ref());
         }
@@ -159,6 +216,10 @@ pub(crate) fn anonymity_change(was: Anonymity, now: Anonymity) -> Option<Check> 
         (Direct, Vpn | HostingProvider | ResidentialProxy) => Some(Check::AnonymizerEntered),
         _ => None,
     }
+}
+
+fn is_ipv6_prefix(prefix: &str) -> bool {
+    prefix.contains(':')
 }
 
 /// The client's /24 (IPv4) or /48 (IPv6) network.
@@ -339,6 +400,22 @@ pub(crate) mod tests {
 
     fn base() -> Fingerprint {
         Fingerprint::capture(&ctx(Some(CHROME_WIN)), &IpInfo::new(Some("BE".into()), Some(5432)))
+    }
+
+    #[test]
+    fn baselines_stored_before_the_family_slots_still_load() {
+        let stored = r#"{"fingerprint":{"ip_prefix":"2001:db8:1::/48"},"previous_ip_prefix":null,"ip_changed_at":null}"#;
+        let mut baseline: Baseline = serde_json::from_str(stored).unwrap();
+        assert_eq!(baseline.ipv6_prefix, None);
+        assert_eq!(baseline.known_prefix("2001:db8:1::/48"), Some("2001:db8:1::/48"));
+        assert_eq!(baseline.known_prefix("192.0.2.0/24"), None);
+
+        let mut v4 = Fingerprint::default();
+        v4.ip_prefix = "192.0.2.0/24".to_owned();
+        baseline.absorb(&v4, Utc::now(), &Checks::default());
+        assert_eq!(baseline.ipv6_prefix.as_deref(), Some("2001:db8:1::/48"));
+        assert_eq!(baseline.ipv4_prefix.as_deref(), Some("192.0.2.0/24"));
+        assert_eq!(baseline.previous_ip_prefix, None, "a new family is no move");
     }
 
     #[test]

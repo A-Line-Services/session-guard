@@ -206,6 +206,8 @@ pub async fn records_round_trip<St: SessionStore>(store: St) {
         },
         previous_ip_prefix: Some("198.51.100.0/24".into()),
         ip_changed_at: Some(now - secs(60)),
+        ipv4_prefix: Some("192.0.2.0/24".into()),
+        ipv6_prefix: Some("2001:db8:1::/48".into()),
     };
     session.origin = Some(SessionOrigin {
         at: now - secs(30),

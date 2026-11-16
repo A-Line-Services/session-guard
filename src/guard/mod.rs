@@ -511,7 +511,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
 
         let token = self.new_token(session.id)?;
         let mut update = SessionUpdate::touch(session.id, now);
-        update.baseline = Some(Baseline::new(self.fingerprint(ctx)));
+        update.baseline = Some(session.baseline.renewed(self.fingerprint(ctx)));
         update.step_up_required = Some(false);
         update.authenticated_at = Some(now);
         // With the current token, only one of several concurrent submits replaces it.
@@ -811,9 +811,10 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         fingerprint: &Fingerprint,
         now: DateTime<Utc>,
     ) -> Result<bool, GuardError> {
-        let known = &lookup.session.baseline.fingerprint;
+        let baseline = &lookup.session.baseline;
+        let known = &baseline.fingerprint;
         let same_client = !fingerprint.ip_prefix.is_empty()
-            && fingerprint.ip_prefix == known.ip_prefix
+            && baseline.known_prefix(&fingerprint.ip_prefix) == Some(fingerprint.ip_prefix.as_str())
             && fingerprint.browser.is_some()
             && fingerprint.browser == known.browser
             && fingerprint.os.is_some()

@@ -54,8 +54,9 @@ pub fn assess(
     // Same network prefix and the same browser and OS: headers that some request types never
     // send (client hints on WebSocket upgrades or EventSource, Accept-Language on bare fetches)
     // are not news. Changed values still count, and a replayed token is caught by rotation.
+    let known_net = baseline.known_prefix(&current.ip_prefix);
     let same_client = !current.ip_prefix.is_empty()
-        && known.ip_prefix == current.ip_prefix
+        && known_net == Some(current.ip_prefix.as_str())
         && known.browser.is_some()
         && known.browser == current.browser
         && known.os.is_some()
@@ -104,7 +105,13 @@ pub fn assess(
         fired.push(Check::InconsistentHints);
     }
 
-    if known.ip_prefix != current.ip_prefix {
+    // Each address family is compared with its own known network: a dual-stack client
+    // alternating between them has not moved. The first request from a family is a move.
+    let moved = match known_net {
+        Some(net) => net != current.ip_prefix,
+        None => known.ip_prefix != current.ip_prefix,
+    };
+    if moved {
         if differs(known.country.as_ref(), current.country.as_ref()) {
             fired.push(Check::CountryChanged);
         } else if differs(known.asn.as_ref(), current.asn.as_ref()) {
@@ -113,7 +120,7 @@ pub fn assess(
             fired.push(Check::IpPrefixChanged);
         }
 
-        let returned = baseline.previous_ip_prefix.as_deref() == Some(current.ip_prefix.as_str());
+        let returned = known_net.is_some() && baseline.previous_ip_prefix.as_deref() == Some(current.ip_prefix.as_str());
         let recent = baseline
             .ip_changed_at
             .is_some_and(|at| now.signed_duration_since(at) <= ping_pong_window);
