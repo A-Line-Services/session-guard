@@ -23,7 +23,13 @@ fn bare(addr: &str) -> ClientContext {
 }
 
 async fn v6_login(h: &Harness, user: Uuid) -> String {
-    h.guard.login(&user, &full(V6), None).await.unwrap().token.expose().to_owned()
+    h.guard
+        .login(&user, &full(V6), None)
+        .await
+        .unwrap()
+        .token
+        .expose()
+        .to_owned()
 }
 
 /// Authenticates, follows a rotation and returns the score and signals.
@@ -40,7 +46,10 @@ async fn the_first_request_from_the_other_family_scores_a_prefix_change() {
     let h = harness();
     let mut token = v6_login(&h, Uuid::new_v4()).await;
     h.advance(Duration::from_secs(5));
-    assert_eq!(request(&h, &mut token, &full(V4)).await, (10, vec![Check::IpPrefixChanged]));
+    assert_eq!(
+        request(&h, &mut token, &full(V4)).await,
+        (10, vec![Check::IpPrefixChanged])
+    );
 }
 
 #[tokio::test]
@@ -53,7 +62,11 @@ async fn alternating_families_never_ping_pong_or_step_up() {
         for addr in [V6, V4] {
             h.advance(Duration::from_secs(30));
             let ctx = if round % 2 == 0 { full(addr) } else { bare(addr) };
-            assert_eq!(request(&h, &mut token, &ctx).await, (0, vec![]), "round {round} from {addr}");
+            assert_eq!(
+                request(&h, &mut token, &ctx).await,
+                (0, vec![]),
+                "round {round} from {addr}"
+            );
         }
     }
     assert_eq!(h.count(EventKind::StepUpRequired), 0);
@@ -66,7 +79,10 @@ async fn a_new_network_within_a_family_still_scores_and_ping_pongs() {
     h.advance(Duration::from_secs(5));
     request(&h, &mut token, &full(V4)).await;
     h.advance(Duration::from_secs(30));
-    assert_eq!(request(&h, &mut token, &full(OTHER_V4)).await, (10, vec![Check::IpPrefixChanged]));
+    assert_eq!(
+        request(&h, &mut token, &full(OTHER_V4)).await,
+        (10, vec![Check::IpPrefixChanged])
+    );
     h.advance(Duration::from_secs(30));
     assert_eq!(request(&h, &mut token, &full(V6)).await, (0, vec![]));
     h.advance(Duration::from_secs(30));

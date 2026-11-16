@@ -120,9 +120,13 @@ impl Baseline {
     #[must_use]
     pub fn renewed(&self, fingerprint: Fingerprint) -> Self {
         let mut renewed = Self::new(fingerprint);
-        for prefix in [self.ipv4_prefix.as_deref(), self.ipv6_prefix.as_deref(), Some(self.fingerprint.ip_prefix.as_str())]
-            .into_iter()
-            .flatten()
+        for prefix in [
+            self.ipv4_prefix.as_deref(),
+            self.ipv6_prefix.as_deref(),
+            Some(self.fingerprint.ip_prefix.as_str()),
+        ]
+        .into_iter()
+        .flatten()
         {
             if renewed.known_prefix(prefix).is_none() {
                 renewed.remember_prefix(prefix);
@@ -133,7 +137,11 @@ impl Baseline {
 
     /// The known network in `prefix`'s address family, if any.
     pub fn known_prefix(&self, prefix: &str) -> Option<&str> {
-        let slot = if is_ipv6_prefix(prefix) { &self.ipv6_prefix } else { &self.ipv4_prefix };
+        let slot = if is_ipv6_prefix(prefix) {
+            &self.ipv6_prefix
+        } else {
+            &self.ipv4_prefix
+        };
         slot.as_deref().or_else(|| {
             let last = self.fingerprint.ip_prefix.as_str();
             (!last.is_empty() && is_ipv6_prefix(last) == is_ipv6_prefix(prefix)).then_some(last)
@@ -144,7 +152,11 @@ impl Baseline {
         if prefix.is_empty() {
             return;
         }
-        let slot = if is_ipv6_prefix(prefix) { &mut self.ipv6_prefix } else { &mut self.ipv4_prefix };
+        let slot = if is_ipv6_prefix(prefix) {
+            &mut self.ipv6_prefix
+        } else {
+            &mut self.ipv4_prefix
+        };
         *slot = Some(prefix.to_owned());
     }
 
@@ -404,7 +416,8 @@ pub(crate) mod tests {
 
     #[test]
     fn baselines_stored_before_the_family_slots_still_load() {
-        let stored = r#"{"fingerprint":{"ip_prefix":"2001:db8:1::/48"},"previous_ip_prefix":null,"ip_changed_at":null}"#;
+        let stored =
+            r#"{"fingerprint":{"ip_prefix":"2001:db8:1::/48"},"previous_ip_prefix":null,"ip_changed_at":null}"#;
         let mut baseline: Baseline = serde_json::from_str(stored).unwrap();
         assert_eq!(baseline.ipv6_prefix, None);
         assert_eq!(baseline.known_prefix("2001:db8:1::/48"), Some("2001:db8:1::/48"));

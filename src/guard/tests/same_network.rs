@@ -42,7 +42,13 @@ fn v6_elsewhere_bare() -> ClientContext {
 }
 
 async fn v6_login(h: &Harness, user: Uuid) -> String {
-    h.guard.login(&user, &v6_home(), None).await.unwrap().token.expose().to_owned()
+    h.guard
+        .login(&user, &v6_home(), None)
+        .await
+        .unwrap()
+        .token
+        .expose()
+        .to_owned()
 }
 
 /// Logs in over IPv6 and loses the first rotation reply: the token is orphaned.
@@ -92,7 +98,11 @@ async fn missing_headers_still_count_on_another_network() {
     let event = h.events.lock().unwrap().last().cloned().unwrap();
     assert_eq!(
         event.signals,
-        vec![Check::ClientHintsMissing, Check::AcceptLanguageChanged, Check::IpPrefixChanged]
+        vec![
+            Check::ClientHintsMissing,
+            Check::AcceptLanguageChanged,
+            Check::IpPrefixChanged
+        ]
     );
 }
 
@@ -102,7 +112,10 @@ async fn an_orphan_presented_without_hints_is_reissued_without_step_up() {
     let t0 = v6_orphan(&h, Uuid::new_v4()).await;
     let a = authenticated(h.guard.authenticate(&t0, &v6_without_hints()).await.unwrap());
     assert!(a.rotated.is_some());
-    assert_eq!((a.assessment.score, a.assessment.signals), (25, vec![Check::OrphanedToken]));
+    assert_eq!(
+        (a.assessment.score, a.assessment.signals),
+        (25, vec![Check::OrphanedToken])
+    );
     assert_eq!(h.count(EventKind::StepUpRequired), 0);
 }
 

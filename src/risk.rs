@@ -120,7 +120,8 @@ pub fn assess(
             fired.push(Check::IpPrefixChanged);
         }
 
-        let returned = known_net.is_some() && baseline.previous_ip_prefix.as_deref() == Some(current.ip_prefix.as_str());
+        let returned =
+            known_net.is_some() && baseline.previous_ip_prefix.as_deref() == Some(current.ip_prefix.as_str());
         let recent = baseline
             .ip_changed_at
             .is_some_and(|at| now.signed_duration_since(at) <= ping_pong_window);

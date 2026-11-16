@@ -152,6 +152,11 @@ async fn orphan_burst_without_client_hints_does_not_step_up() {
         .unwrap();
     h.advance(secs(1));
     authenticated(h.guard.authenticate(&t0, &home_without_hints()).await.unwrap());
-    authenticated(h.guard.authenticate(reissued.expose(), &home_without_hints()).await.unwrap());
+    authenticated(
+        h.guard
+            .authenticate(reissued.expose(), &home_without_hints())
+            .await
+            .unwrap(),
+    );
     assert_eq!(h.count(EventKind::StepUpRequired), 0);
 }
