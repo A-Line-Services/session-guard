@@ -187,6 +187,21 @@ pub trait SessionStore: Send + Sync + 'static {
     /// Finds the session holding `token`, current or superseded.
     fn find_by_token(&self, token: &TokenHash) -> impl Future<Output = Result<Option<TokenLookup>, StoreError>> + Send;
 
+    /// The tokens issued after `token` in its session that have been used (`first_used_at`
+    /// set), oldest first; empty for an unknown token. `None` means the store does not support
+    /// this lookup.
+    ///
+    /// The guard asks only when [`TokenLookup::newer_token_used`] is set, to tell a parallel
+    /// request that raced an orphan reissue from a replayed token. Without it (the default)
+    /// every such request counts as reuse and revokes the session.
+    fn newer_used_tokens(
+        &self,
+        token: &TokenHash,
+    ) -> impl Future<Output = Result<Option<Vec<TokenRecord>>, StoreError>> + Send {
+        let _ = token;
+        std::future::ready(Ok(None))
+    }
+
     /// Applies `update` atomically, in this order:
     ///
     /// 1. If `rotation` is set and its [`Supersede`] condition holds for the current token:
@@ -264,6 +279,13 @@ impl<T: SessionStore> SessionStore for std::sync::Arc<T> {
 
     fn find_by_token(&self, token: &TokenHash) -> impl Future<Output = Result<Option<TokenLookup>, StoreError>> + Send {
         (**self).find_by_token(token)
+    }
+
+    fn newer_used_tokens(
+        &self,
+        token: &TokenHash,
+    ) -> impl Future<Output = Result<Option<Vec<TokenRecord>>, StoreError>> + Send {
+        (**self).newer_used_tokens(token)
     }
 
     fn apply(&self, update: &SessionUpdate) -> impl Future<Output = Result<bool, StoreError>> + Send {

@@ -279,6 +279,33 @@ impl SessionStore for PgStore {
         Ok(row.as_ref().map(lookup_from_row).transpose()?)
     }
 
+    async fn newer_used_tokens(&self, token: &TokenHash) -> Result<Option<Vec<TokenRecord>>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT n.hash, n.issued_at, n.first_used_at, n.superseded_at
+             FROM session_guard_tokens t
+             JOIN session_guard_tokens n
+               ON n.session_id = t.session_id AND n.seq > t.seq AND n.first_used_at IS NOT NULL
+             WHERE t.hash = $1
+             ORDER BY n.seq",
+        )
+        .bind(&token.as_bytes()[..])
+        .fetch_all(&self.pool)
+        .await?;
+        let tokens = rows
+            .iter()
+            .map(|row| {
+                let hash: Vec<u8> = row.try_get("hash")?;
+                Ok(TokenRecord {
+                    hash: decode_hash(&hash)?,
+                    issued_at: row.try_get("issued_at")?,
+                    first_used_at: row.try_get("first_used_at")?,
+                    superseded_at: row.try_get("superseded_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+        Ok(Some(tokens))
+    }
+
     async fn apply(&self, update: &SessionUpdate) -> Result<bool, StoreError> {
         let mut tx = self.pool.begin().await?;
         match Self::apply_in(&mut tx, update).await {

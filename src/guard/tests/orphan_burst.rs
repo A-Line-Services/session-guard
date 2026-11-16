@@ -69,8 +69,7 @@ async fn concurrent_presentations_of_an_orphan_share_one_reissue() {
     );
     let rotated = [a, b, c]
         .into_iter()
-        .map(|outcome| authenticated(outcome.unwrap()).rotated)
-        .filter(Option::is_some)
+        .filter_map(|outcome| authenticated(outcome.unwrap()).rotated)
         .count();
     assert_eq!(rotated, 1);
     assert_eq!(h.count(EventKind::TokenReissued), 1);

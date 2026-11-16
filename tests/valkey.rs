@@ -31,6 +31,11 @@ async fn store() -> ValkeyStore {
 session_guard::store_conformance!(store);
 
 #[tokio::test(flavor = "multi_thread")]
+async fn newer_used_tokens_are_supported() {
+    session_guard::testing::newer_used_tokens_are_supported(store().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_rotation_across_tasks_has_one_winner() {
     let store = Arc::new(store().await);
     let now = testing::now_secs();

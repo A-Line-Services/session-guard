@@ -210,6 +210,29 @@ impl SessionStore for MemoryStore {
         })
     }
 
+    fn newer_used_tokens(
+        &self,
+        token: &TokenHash,
+    ) -> impl Future<Output = Result<Option<Vec<TokenRecord>>, StoreError>> + Send {
+        self.with(|state| {
+            let newer = state
+                .token_index
+                .get(token)
+                .and_then(|id| state.sessions.get(id))
+                .and_then(|entry| {
+                    let position = entry.tokens.iter().position(|t| t.hash == *token)?;
+                    Some(
+                        entry.tokens[position + 1..]
+                            .iter()
+                            .filter(|t| t.first_used_at.is_some())
+                            .copied()
+                            .collect(),
+                    )
+                });
+            Some(newer.unwrap_or_default())
+        })
+    }
+
     fn apply(&self, update: &SessionUpdate) -> impl Future<Output = Result<bool, StoreError>> + Send {
         self.with(|state| {
             if self.sharded
@@ -307,6 +330,11 @@ mod tests {
     use super::MemoryStore;
 
     crate::store_conformance!(|| async { MemoryStore::new() });
+
+    #[tokio::test]
+    async fn newer_used_tokens_are_supported() {
+        crate::testing::newer_used_tokens_are_supported(MemoryStore::new()).await;
+    }
 
     #[tokio::test]
     async fn duplicate_token_is_rejected() {

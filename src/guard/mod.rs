@@ -195,6 +195,9 @@ enum TokenState {
     Orphaned,
     /// Superseded and its successor is in use: two parties hold the session.
     Reuse,
+    /// An orphan presented again by the same client moments after it was reissued: a
+    /// parallel request that carried the orphan too. Accepted without another reissue.
+    RacedReissue,
 }
 
 /// A token resolved to a live session with a decodable subject.
@@ -364,16 +367,19 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             lookup,
             hash,
             subject,
-            state,
+            mut state,
         } = resolved;
         let session = &lookup.session;
+        let fingerprint = self.fingerprint(ctx);
+        if state == TokenState::Reuse && self.raced_reissue(&lookup, &hash, &fingerprint, now).await? {
+            state = TokenState::RacedReissue;
+        }
 
         if state == TokenState::Reuse {
             self.revoke_for_reuse(session, ctx).await?;
             return Ok(Outcome::Rejected(Rejection::Revoked));
         }
 
-        let fingerprint = self.fingerprint(ctx);
         let assessment = self.assess(&session.baseline, &fingerprint, state, now, checks);
         let decision = config.thresholds.decide(assessment.score);
         crate::telemetry::assessed(decision, &assessment.signals);
@@ -790,6 +796,42 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
             Some(_) if !lookup.newer_token_used => TokenState::Orphaned,
             Some(_) => TokenState::Reuse,
         }
+    }
+
+    /// Whether a token classified as reuse is really a parallel request that raced its own
+    /// orphan reissue: the only newer token ever used is the session's current one, reissued
+    /// (used from the moment it was issued) no more than `rotation_grace` ago, and the request
+    /// comes from the baseline's network prefix with the same browser and OS family. A replay
+    /// after the grace, from elsewhere, or of a token whose successor a client did use, stays
+    /// reuse.
+    async fn raced_reissue(
+        &self,
+        lookup: &crate::store::TokenLookup,
+        hash: &TokenHash,
+        fingerprint: &Fingerprint,
+        now: DateTime<Utc>,
+    ) -> Result<bool, GuardError> {
+        let known = &lookup.session.baseline.fingerprint;
+        let same_client = !fingerprint.ip_prefix.is_empty()
+            && fingerprint.ip_prefix == known.ip_prefix
+            && fingerprint.browser.is_some()
+            && fingerprint.browser == known.browser
+            && fingerprint.os.is_some()
+            && fingerprint.os == known.os;
+        if !same_client {
+            return Ok(false);
+        }
+        let Some(newer) = self.inner.store.newer_used_tokens(hash).await? else {
+            return Ok(false);
+        };
+        Ok(match newer.as_slice() {
+            [successor] => {
+                successor.superseded_at.is_none()
+                    && successor.first_used_at == Some(successor.issued_at)
+                    && now - successor.issued_at <= self.inner.config.rotation_grace
+            }
+            _ => false,
+        })
     }
 
     /// Whether an orphaned token was superseded longer ago than the reissue window allows.

@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - Unreleased
+
+### Bug Fixes
+
+- fix(guard): a request that raced an orphan reissue no longer revokes the session. When a rotation reply is lost and the client then sends several requests with the old token at once, the first gets the reissued token and the others used to count as token reuse. Now a repeat of the orphan within the rotation grace of its reissue, from the same network prefix and browser and OS family, is accepted without another reissue. Later replays, replays from elsewhere and replays of a token whose successor a client used still revoke.
+- feat(store): `SessionStore::newer_used_tokens` (default `None`, unsupported: the guard keeps revoking on every reuse). Memory, Postgres and Valkey stores implement it; conformance check `newer_used_tokens_are_listed`.
+
 ## [0.3.2] - 2026-11-02
 
 ### Chores

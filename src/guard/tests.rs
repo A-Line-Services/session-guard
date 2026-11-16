@@ -450,6 +450,8 @@ async fn orphaned_token_is_reissued_only_once() {
         .rotated
         .unwrap();
 
+    // Past the reissued token's grace, so not a parallel request racing the reissue (see
+    // `orphan_burst`): the orphan is reuse.
     h.advance(mins(1));
     assert_eq!(
         rejected(h.guard.authenticate(&t0, &home()).await.unwrap()),
