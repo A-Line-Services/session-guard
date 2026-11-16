@@ -1,0 +1,7 @@
+[advisories]
+ignore = [
+    # libsqlite3-sys is in Cargo.lock only because sqlx-macros declares an
+    # optional sqlite backend; it is never compiled (see `cargo tree -i
+    # libsqlite3-sys --all-features`). Drop once sqlx bumps to >=0.39.
+    "RUSTSEC-2026-0459",
+]
