@@ -4,6 +4,11 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # Unmaintained tar crate pulled in by testcontainers (dev-only, never ships).
+    # Drop once testcontainers moves off it.
+    { id = "RUSTSEC-2026-0440", reason = "dev-only via testcontainers; no maintained replacement upstream yet" },
+]
 
 [licenses]
 version = 2
