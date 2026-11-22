@@ -1459,6 +1459,18 @@ fn racing() -> Racing {
 }
 
 #[tokio::test]
+async fn default_claim_event_always_succeeds() {
+    let store = RacingStore::default();
+    let window = time::Duration::minutes(10);
+    for _ in 0..2 {
+        let claimed = store
+            .claim_event(ClaimScope::Subject("alice"), EventKind::RiskRevoked, start(), window)
+            .await;
+        assert!(claimed.unwrap());
+    }
+}
+
+#[tokio::test]
 async fn risk_revoke_lost_to_a_concurrent_delete_is_not_reported() {
     let r = racing();
     let t0 = r.guard.login(&Uuid::new_v4(), &home(), None).await.unwrap().token;
