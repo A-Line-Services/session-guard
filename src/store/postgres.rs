@@ -2,13 +2,13 @@
 
 use std::{fmt, sync::LazyLock};
 
-use chrono::{DateTime, TimeDelta, Utc};
 use sqlx::{
     PgPool, Postgres, Row, Transaction,
     migrate::{MigrateError, Migrator},
     postgres::PgRow,
     types::Json,
 };
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{ClaimScope, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
@@ -352,7 +352,7 @@ impl SessionStore for PgStore {
         Ok(rows.iter().map(session_from_row).collect::<Result<_, _>>()?)
     }
 
-    async fn delete_expired(&self, now: DateTime<Utc>, idle_cutoff: DateTime<Utc>) -> Result<u64, StoreError> {
+    async fn delete_expired(&self, now: OffsetDateTime, idle_cutoff: OffsetDateTime) -> Result<u64, StoreError> {
         let done = sqlx::query("DELETE FROM session_guard_sessions WHERE expires_at <= $1 OR last_seen_at <= $2")
             .bind(now)
             .bind(idle_cutoff)
@@ -383,7 +383,7 @@ impl SessionStore for PgStore {
         Ok(())
     }
 
-    async fn delete_events_before(&self, cutoff: DateTime<Utc>) -> Result<u64, StoreError> {
+    async fn delete_events_before(&self, cutoff: OffsetDateTime) -> Result<u64, StoreError> {
         let done = sqlx::query(
             "WITH claims AS (DELETE FROM session_guard_event_claims WHERE claimed_at < $1),
                   subject_claims AS (DELETE FROM session_guard_subject_claims WHERE claimed_at < $1)
@@ -399,12 +399,12 @@ impl SessionStore for PgStore {
         &self,
         scope: ClaimScope<'_>,
         kind: EventKind,
-        now: DateTime<Utc>,
-        window: TimeDelta,
+        now: OffsetDateTime,
+        window: time::Duration,
     ) -> Result<bool, StoreError> {
         // A claim at or before `now - window` has lapsed. If that instant does not exist, no
         // stored claim can have lapsed; NULL never compares true.
-        let lapsed_at = now.checked_sub_signed(window);
+        let lapsed_at = now.checked_sub(window);
         let query = match scope {
             ClaimScope::Session(session_id) => sqlx::query(
                 "INSERT INTO session_guard_event_claims (session_id, kind, claimed_at) VALUES ($1, $2, $3)

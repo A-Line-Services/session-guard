@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use chrono::{DateTime, Utc};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use secrecy::{ExposeSecret, SecretString};
@@ -19,11 +19,11 @@ pub struct AuthSession<S> {
     /// Who the session belongs to.
     pub subject: S,
     /// When the session was created.
-    pub created_at: DateTime<Utc>,
+    pub created_at: OffsetDateTime,
     /// When the subject last proved who they are (login or completed step-up).
-    pub authenticated_at: DateTime<Utc>,
+    pub authenticated_at: OffsetDateTime,
     /// Absolute expiry.
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: OffsetDateTime,
 }
 
 impl<S> AuthSession<S> {
@@ -45,7 +45,7 @@ impl<S> AuthSession<S> {
 pub struct IssuedToken {
     /// The cookie value: the configured prefix, if any, then the token.
     pub(crate) value: SecretString,
-    pub(crate) expires_at: DateTime<Utc>,
+    pub(crate) expires_at: OffsetDateTime,
     /// Holds the token too, so it is wiped on drop like `value`.
     pub(crate) set_cookie: Zeroizing<String>,
 }
@@ -58,7 +58,7 @@ impl IssuedToken {
     }
 
     /// When the session, and so the cookie, expires.
-    pub fn expires_at(&self) -> DateTime<Utc> {
+    pub fn expires_at(&self) -> OffsetDateTime {
         self.expires_at
     }
 
@@ -192,13 +192,13 @@ pub struct SessionInfo<S> {
     /// Who the session belongs to.
     pub subject: S,
     /// When it was created.
-    pub created_at: DateTime<Utc>,
+    pub created_at: OffsetDateTime,
     /// When the subject last proved who they are.
-    pub authenticated_at: DateTime<Utc>,
+    pub authenticated_at: OffsetDateTime,
     /// Last request (written at most once per write interval).
-    pub last_seen_at: DateTime<Utc>,
+    pub last_seen_at: OffsetDateTime,
     /// Absolute expiry.
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: OffsetDateTime,
     /// Whether the session is waiting for step-up.
     pub step_up_required: bool,
     /// Browser family of the session's client.

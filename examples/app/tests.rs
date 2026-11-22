@@ -9,7 +9,7 @@ use axum::{
     http::{HeaderMap, Request, StatusCode, header},
     response::Response,
 };
-use chrono::{TimeZone, Utc};
+
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use session_guard::{IpInfo, ManualClock, MemoryStore};
@@ -31,7 +31,7 @@ struct App {
 }
 
 fn app() -> App {
-    let clock = ManualClock::new(Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap());
+    let clock = ManualClock::new(time::macros::datetime!(2026-03-01 12:00 UTC));
     let guard = config::builder(MemoryStore::new())
         .expect("valid configuration")
         .ip_intel(|_ip: std::net::IpAddr| IpInfo::new(Some("US".into()), None))

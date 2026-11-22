@@ -71,6 +71,7 @@ pub mod event;
 pub mod fingerprint;
 mod guard;
 pub mod intel;
+mod rfc3339;
 pub mod risk;
 pub mod store;
 pub mod subject;

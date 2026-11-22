@@ -877,7 +877,6 @@ mod tests {
 
 use std::{net::IpAddr, time::Duration};
 
-use chrono::{TimeZone, Utc};
 use session_guard::{
     ClientContext, Guard, GuardConfig, IpInfo, ManualClock, MemoryStore, Outcome, Rejection, SessionEvent,
     StepUpOutcome,
@@ -901,7 +900,7 @@ fn describe(outcome: &Outcome<Uuid>) -> String {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A manual clock lets the example skip time. Production code uses the default system clock.
-    let clock = ManualClock::new(Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap());
+    let clock = ManualClock::new(time::macros::datetime!(2026-03-01 12:00 UTC));
 
     let guard = Guard::builder(MemoryStore::new(), GuardConfig::builder().build()?)
         // Country lookup, so that changing country is a risk signal. Use `MaxMindIntel` in
@@ -1245,7 +1244,13 @@ pub struct AppState {
 use rovo::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session_guard::SessionInfo;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
+
+/// `at` as an RFC 3339 string.
+pub fn rfc3339(at: OffsetDateTime) -> String {
+    at.format(&Rfc3339).unwrap_or_default()
+}
 
 /// What the client sends to log in, and again to step up.
 #[derive(Deserialize, JsonSchema)]
@@ -1319,8 +1324,8 @@ impl SessionView {
         Self {
             session_id: info.session_id,
             current: info.session_id == current,
-            created_at: info.created_at.to_rfc3339(),
-            last_seen_at: info.last_seen_at.to_rfc3339(),
+            created_at: rfc3339(info.created_at),
+            last_seen_at: rfc3339(info.last_seen_at),
             browser: info.browser,
             os: info.os,
             country: info.country,
@@ -1537,7 +1542,7 @@ use crate::{
     Store,
     app::{
         errors::AppError,
-        models::{Done, ErrorBody, Me, SessionView},
+        models::{Done, ErrorBody, Me, SessionView, rfc3339},
         state::AppState,
     },
 };
@@ -1559,8 +1564,8 @@ pub async fn me(session: AuthSession<Uuid>) -> Json<Me> {
     Json(Me {
         subject: session.subject,
         session_id: session.session_id,
-        authenticated_at: session.authenticated_at.to_rfc3339(),
-        expires_at: session.expires_at.to_rfc3339(),
+        authenticated_at: rfc3339(session.authenticated_at),
+        expires_at: rfc3339(session.expires_at),
     })
 }
 

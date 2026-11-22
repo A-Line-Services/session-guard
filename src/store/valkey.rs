@@ -2,7 +2,6 @@
 
 use std::{fmt, net::IpAddr, sync::LazyLock};
 
-use chrono::{DateTime, TimeDelta, Utc};
 use redis::{
     RedisFuture, Script, Value,
     aio::{ConnectionLike, ConnectionManager},
@@ -10,6 +9,7 @@ use redis::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
@@ -504,19 +504,23 @@ fn ensure_aligned(session_id: Uuid, token: &TokenHash) -> Result<(), StoreError>
     }
 }
 
-fn micros(at: DateTime<Utc>) -> String {
-    at.timestamp_micros().to_string()
+fn micros(at: OffsetDateTime) -> String {
+    unix_micros(at).to_string()
 }
 
-fn parse_time(value: &str) -> Result<DateTime<Utc>, StoreError> {
+fn unix_micros(at: OffsetDateTime) -> i64 {
+    at.unix_timestamp() * 1_000_000 + i64::from(at.microsecond())
+}
+
+fn parse_time(value: &str) -> Result<OffsetDateTime, StoreError> {
     value
         .parse::<i64>()
         .ok()
-        .and_then(DateTime::from_timestamp_micros)
+        .and_then(|us| OffsetDateTime::from_unix_timestamp_nanos(i128::from(us) * 1000).ok())
         .ok_or_else(|| "valkey store: malformed timestamp".into())
 }
 
-fn parse_optional_time(value: &str) -> Result<Option<DateTime<Utc>>, StoreError> {
+fn parse_optional_time(value: &str) -> Result<Option<OffsetDateTime>, StoreError> {
     if value.is_empty() {
         Ok(None)
     } else {
@@ -561,7 +565,8 @@ struct EventRow<'a> {
     ip: IpAddr,
     user_agent: Option<&'a str>,
     client: &'a ClientSummary,
-    at: DateTime<Utc>,
+    #[serde(with = "crate::rfc3339")]
+    at: OffsetDateTime,
 }
 
 impl SessionStore for ValkeyStore {
@@ -574,11 +579,7 @@ impl SessionStore for ValkeyStore {
         let bucket = session_bucket(session.id);
         let sid = session.id.to_string();
         let hex = token.to_hex();
-        let exp_ms = session
-            .expires_at
-            .timestamp_micros()
-            .saturating_add(999)
-            .div_euclid(1000);
+        let exp_ms = unix_micros(session.expires_at).saturating_add(999).div_euclid(1000);
         // Index first: a concurrent revoke then either sees the id or makes the check below fail.
         let sbucket = subject_bucket(&session.subject);
         let _: i64 = INDEX_ADD
@@ -824,7 +825,7 @@ impl SessionStore for ValkeyStore {
         Ok(sessions)
     }
 
-    async fn delete_expired(&self, now: DateTime<Utc>, idle_cutoff: DateTime<Utc>) -> Result<u64, StoreError> {
+    async fn delete_expired(&self, now: OffsetDateTime, idle_cutoff: OffsetDateTime) -> Result<u64, StoreError> {
         let mut total = 0;
         for bucket in 0..=u8::MAX {
             loop {
@@ -861,14 +862,14 @@ impl SessionStore for ValkeyStore {
         };
         let _added: i64 = redis::cmd("ZADD")
             .arg(self.plain_key(session_bucket(event.session_id), "e"))
-            .arg(event.at.timestamp_micros())
+            .arg(unix_micros(event.at))
             .arg(serde_json::to_string(&row)?)
             .query_async(&mut self.conn())
             .await?;
         Ok(())
     }
 
-    async fn delete_events_before(&self, cutoff: DateTime<Utc>) -> Result<u64, StoreError> {
+    async fn delete_events_before(&self, cutoff: OffsetDateTime) -> Result<u64, StoreError> {
         let mut total = 0;
         for bucket in 0..=u8::MAX {
             let deleted: u64 = DELETE_EVENTS
@@ -887,16 +888,16 @@ impl SessionStore for ValkeyStore {
         &self,
         scope: ClaimScope<'_>,
         kind: EventKind,
-        now: DateTime<Utc>,
-        window: TimeDelta,
+        now: OffsetDateTime,
+        window: time::Duration,
     ) -> Result<bool, StoreError> {
         // A session id never starts with `s:`, and no kind contains `:`, so members are unique.
         let (bucket, member) = match scope {
             ClaimScope::Session(session_id) => (session_bucket(session_id), format!("{session_id}:{kind}")),
             ClaimScope::Subject(subject) => (subject_bucket(subject), format!("s:{subject}:{kind}")),
         };
-        let micros_window = window.num_microseconds().unwrap_or(i64::MAX);
-        let millis_window = window.num_milliseconds().max(1);
+        let micros_window = i64::try_from(window.whole_microseconds()).unwrap_or(i64::MAX);
+        let millis_window = i64::try_from(window.whole_milliseconds()).unwrap_or(i64::MAX).max(1);
         let claimed: i64 = CLAIM
             .key(self.key(bucket, "c", &member))
             .key(self.plain_key(bucket, "cz"))

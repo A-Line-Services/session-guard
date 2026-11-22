@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, TimeDelta, Utc};
+use time::{OffsetDateTime, PrimitiveDateTime};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -64,8 +64,8 @@ struct Inner<St> {
 
 /// Last time each unenforced event was recorded, for shadow-mode deduplication.
 struct ShadowSeen {
-    seen: HashMap<(Uuid, EventKind), DateTime<Utc>>,
-    pruned_at: DateTime<Utc>,
+    seen: HashMap<(Uuid, EventKind), OffsetDateTime>,
+    pruned_at: OffsetDateTime,
 }
 
 impl<St, S> Clone for Guard<St, S> {
@@ -171,7 +171,7 @@ impl<St: SessionStore, S: Subject> GuardBuilder<St, S> {
                 xff_warned: AtomicBool::new(false),
                 shadow_seen: Mutex::new(ShadowSeen {
                     seen: HashMap::new(),
-                    pruned_at: DateTime::<Utc>::MIN_UTC,
+                    pruned_at: PrimitiveDateTime::MIN.assume_utc(),
                 }),
             }),
             _subject: PhantomData,
@@ -314,9 +314,9 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         &self,
         session_id: Uuid,
         state: TokenState,
-        issued_at: DateTime<Utc>,
+        issued_at: OffsetDateTime,
         hash: TokenHash,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<Option<(Rotation, SessionToken)>, GuardError> {
         let config = &self.inner.config;
         let supersede = match state {
@@ -339,7 +339,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         baseline: &Baseline,
         fingerprint: &Fingerprint,
         state: TokenState,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
         checks: &Checks,
     ) -> crate::risk::Assessment {
         let window = self.inner.config.ping_pong_window;
@@ -740,7 +740,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         self.presented_hash(value).is_some()
     }
 
-    fn now(&self) -> DateTime<Utc> {
+    fn now(&self) -> OffsetDateTime {
         self.inner.clock.now()
     }
 
@@ -769,14 +769,14 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         TokenHash::from_presented(bare)
     }
 
-    fn issue(&self, token: &SessionToken, expires_at: DateTime<Utc>) -> IssuedToken {
+    fn issue(&self, token: &SessionToken, expires_at: OffsetDateTime) -> IssuedToken {
         // Exact capacity, so neither building the value nor boxing it into the secret leaves an
         // unwiped copy behind in a reallocated buffer.
         let prefix = self.inner.config.token_prefix.as_deref().unwrap_or("");
         let mut value = String::with_capacity(prefix.len() + token.expose().len());
         value.push_str(prefix);
         value.push_str(token.expose());
-        let max_age = (expires_at - self.now()).num_seconds();
+        let max_age = (expires_at - self.now()).whole_seconds();
         let set_cookie = Zeroizing::new(self.inner.config.cookie.set_cookie(&value, max_age));
         IssuedToken {
             value: SecretString::from(value),
@@ -785,11 +785,11 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         }
     }
 
-    fn is_live(&self, record: &SessionRecord, now: DateTime<Utc>) -> bool {
+    fn is_live(&self, record: &SessionRecord, now: OffsetDateTime) -> bool {
         now < record.expires_at && now - record.last_seen_at < self.inner.config.idle_timeout
     }
 
-    fn classify(&self, lookup: &crate::store::TokenLookup, now: DateTime<Utc>) -> TokenState {
+    fn classify(&self, lookup: &crate::store::TokenLookup, now: OffsetDateTime) -> TokenState {
         match lookup.token.superseded_at {
             None => TokenState::Current,
             Some(at) if now - at <= self.inner.config.rotation_grace => TokenState::Grace,
@@ -809,7 +809,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
         lookup: &crate::store::TokenLookup,
         hash: &TokenHash,
         fingerprint: &Fingerprint,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<bool, GuardError> {
         let baseline = &lookup.session.baseline;
         let known = &baseline.fingerprint;
@@ -836,7 +836,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
     }
 
     /// Whether an orphaned token was superseded longer ago than the reissue window allows.
-    fn orphan_too_old(&self, lookup: &crate::store::TokenLookup, now: DateTime<Utc>) -> bool {
+    fn orphan_too_old(&self, lookup: &crate::store::TokenLookup, now: OffsetDateTime) -> bool {
         match (self.inner.config.orphan_reissue_window, lookup.token.superseded_at) {
             (Some(window), Some(at)) => now - at > window,
             _ => false,
@@ -844,7 +844,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
     }
 
     /// Finds a token's live session. Expired sessions are deleted on sight.
-    async fn resolve(&self, token: &str, now: DateTime<Utc>) -> Result<Result<Resolved<S>, Rejection>, GuardError> {
+    async fn resolve(&self, token: &str, now: OffsetDateTime) -> Result<Result<Resolved<S>, Rejection>, GuardError> {
         let store = &self.inner.store;
         let Some(hash) = self.presented_hash(token) else {
             return Ok(Err(Rejection::NotAuthenticated));
@@ -1018,7 +1018,7 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
     /// Whether this process already handled an unenforced `kind` event for the session within
     /// the dedup window; notes this one if not. A cheap first filter in front of the store's
     /// cross-process [`SessionStore::claim_event`].
-    fn seen_recently(&self, session_id: Uuid, kind: EventKind, now: DateTime<Utc>) -> bool {
+    fn seen_recently(&self, session_id: Uuid, kind: EventKind, now: OffsetDateTime) -> bool {
         let window = self.inner.config.shadow_dedup_window;
         let mut state = self.inner.shadow_seen.lock().unwrap_or_else(PoisonError::into_inner);
         if now - state.pruned_at >= window || state.seen.len() >= SHADOW_SEEN_CAPACITY {
@@ -1039,6 +1039,6 @@ impl<St: SessionStore, S: Subject> Guard<St, S> {
     }
 }
 
-fn td(duration: Duration) -> TimeDelta {
-    TimeDelta::from_std(duration).unwrap_or(TimeDelta::MAX)
+fn td(duration: Duration) -> time::Duration {
+    time::Duration::try_from(duration).unwrap_or(time::Duration::MAX)
 }

@@ -7,7 +7,6 @@ mod support;
 
 use std::time::Duration;
 
-use chrono::TimeDelta;
 use session_guard::{ClaimScope, EventKind, PgStore, Rotation, SessionStore, SessionUpdate, Supersede, testing};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use support::postgres_url;
@@ -64,7 +63,7 @@ async fn concurrent_apply_from_tasks_has_one_winner() {
                     prune_superseded_before: now,
                 }),
                 mark_used: Some(first),
-                ..SessionUpdate::touch(session.id, now + TimeDelta::seconds(1))
+                ..SessionUpdate::touch(session.id, now + time::Duration::seconds(1))
             };
             tokio::spawn(async move { (candidate, store.apply(&update).await.unwrap()) })
         })
@@ -97,7 +96,7 @@ async fn claims_dedupe_across_store_instances() {
     let store = store().await;
     let other = PgStore::new(pool().await);
     let now = testing::now_secs();
-    let window = TimeDelta::seconds(600);
+    let window = time::Duration::seconds(600);
     let scope = ClaimScope::Session(Uuid::new_v4());
     assert!(
         store
@@ -107,7 +106,12 @@ async fn claims_dedupe_across_store_instances() {
     );
     assert!(
         !other
-            .claim_event(scope, EventKind::StepUpRequired, now + TimeDelta::seconds(5), window)
+            .claim_event(
+                scope,
+                EventKind::StepUpRequired,
+                now + time::Duration::seconds(5),
+                window
+            )
             .await
             .unwrap()
     );
@@ -123,7 +127,7 @@ async fn concurrent_claims_have_one_winner() {
             let store = store.clone();
             tokio::spawn(async move {
                 store
-                    .claim_event(scope, EventKind::RiskRevoked, now, TimeDelta::seconds(600))
+                    .claim_event(scope, EventKind::RiskRevoked, now, time::Duration::seconds(600))
                     .await
                     .unwrap()
             })

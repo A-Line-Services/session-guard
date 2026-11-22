@@ -10,7 +10,6 @@
 
 use std::{net::IpAddr, time::Duration};
 
-use chrono::{TimeZone, Utc};
 use session_guard::{
     ClientContext, Guard, GuardConfig, IpInfo, ManualClock, MemoryStore, Outcome, Rejection, SessionEvent,
     StepUpOutcome,
@@ -34,7 +33,7 @@ fn describe(outcome: &Outcome<Uuid>) -> String {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A manual clock lets the example skip time. Production code uses the default system clock.
-    let clock = ManualClock::new(Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap());
+    let clock = ManualClock::new(time::macros::datetime!(2026-03-01 12:00 UTC));
 
     let guard = Guard::builder(MemoryStore::new(), GuardConfig::builder().build()?)
         // Country lookup, so that changing country is a risk signal. Use `MaxMindIntel` in

@@ -15,7 +15,7 @@ mod valkey;
 
 use std::future::Future;
 
-use chrono::{DateTime, TimeDelta, Utc};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// The bucket a session id belongs to: its last byte. Sharded stores keep all of a session's
@@ -53,14 +53,14 @@ pub struct SessionRecord {
     /// The subject in canonical JSON form (see [`Subject`](crate::Subject)).
     pub subject: String,
     /// When the session was created.
-    pub created_at: DateTime<Utc>,
+    pub created_at: OffsetDateTime,
     /// When the subject last proved who they are (login or completed step-up).
-    pub authenticated_at: DateTime<Utc>,
+    pub authenticated_at: OffsetDateTime,
     /// Last request, written at most once per
     /// [`last_seen_write_interval`](crate::GuardConfig::last_seen_write_interval).
-    pub last_seen_at: DateTime<Utc>,
+    pub last_seen_at: OffsetDateTime,
     /// Absolute expiry.
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: OffsetDateTime,
     /// Requests are rejected until step-up completes.
     pub step_up_required: bool,
     /// What the session's client looks like.
@@ -75,11 +75,11 @@ pub struct TokenRecord {
     /// SHA-256 of the token.
     pub hash: TokenHash,
     /// When it was issued.
-    pub issued_at: DateTime<Utc>,
+    pub issued_at: OffsetDateTime,
     /// When a client first presented it. `None` means its response may never have arrived.
-    pub first_used_at: Option<DateTime<Utc>>,
+    pub first_used_at: Option<OffsetDateTime>,
     /// When a newer token replaced it. `None` for the session's current token.
-    pub superseded_at: Option<DateTime<Utc>>,
+    pub superseded_at: Option<OffsetDateTime>,
 }
 
 /// Result of [`SessionStore::find_by_token`].
@@ -102,7 +102,7 @@ pub enum Supersede {
     /// both ask for this; exactly one wins.
     Exact(TokenHash),
     /// Only if the current token was issued strictly before this instant.
-    CurrentIssuedBefore(DateTime<Utc>),
+    CurrentIssuedBefore(OffsetDateTime),
     /// Whatever token is current.
     Current,
 }
@@ -125,7 +125,7 @@ pub struct Rotation {
     /// Which token is replaced (its `superseded_at` becomes `now`).
     pub supersede: Supersede,
     /// Delete this session's tokens superseded strictly before this instant.
-    pub prune_superseded_before: DateTime<Utc>,
+    pub prune_superseded_before: OffsetDateTime,
 }
 
 /// Everything one request changes, applied atomically by [`SessionStore::apply`].
@@ -134,7 +134,7 @@ pub struct SessionUpdate {
     /// The session to update.
     pub session_id: Uuid,
     /// The request time; `last_seen_at` becomes this.
-    pub now: DateTime<Utc>,
+    pub now: OffsetDateTime,
     /// Set this token's `first_used_at` to `now` if it is still unset.
     pub mark_used: Option<TokenHash>,
     /// Replace the baseline.
@@ -142,14 +142,14 @@ pub struct SessionUpdate {
     /// Set the step-up flag.
     pub step_up_required: Option<bool>,
     /// Set `authenticated_at`.
-    pub authenticated_at: Option<DateTime<Utc>>,
+    pub authenticated_at: Option<OffsetDateTime>,
     /// Rotate the token.
     pub rotation: Option<Rotation>,
 }
 
 impl SessionUpdate {
     /// An update that only touches `last_seen_at`.
-    pub fn touch(session_id: Uuid, now: DateTime<Utc>) -> Self {
+    pub fn touch(session_id: Uuid, now: OffsetDateTime) -> Self {
         Self {
             session_id,
             now,
@@ -230,8 +230,8 @@ pub trait SessionStore: Send + Sync + 'static {
     /// many.
     fn delete_expired(
         &self,
-        now: DateTime<Utc>,
-        idle_cutoff: DateTime<Utc>,
+        now: OffsetDateTime,
+        idle_cutoff: OffsetDateTime,
     ) -> impl Future<Output = Result<u64, StoreError>> + Send;
 
     /// Appends a security event. Stores without an event log may discard it.
@@ -239,7 +239,7 @@ pub trait SessionStore: Send + Sync + 'static {
 
     /// Deletes events with `at < cutoff`. Returns how many. Also deletes event claims older
     /// than `cutoff`.
-    fn delete_events_before(&self, cutoff: DateTime<Utc>) -> impl Future<Output = Result<u64, StoreError>> + Send;
+    fn delete_events_before(&self, cutoff: OffsetDateTime) -> impl Future<Output = Result<u64, StoreError>> + Send;
 
     /// Claims the right to report a `kind` event for `scope`, for deduplication across
     /// processes. Succeeds (`true`) unless a claim for the same scope and kind was made after
@@ -256,8 +256,8 @@ pub trait SessionStore: Send + Sync + 'static {
         &self,
         scope: ClaimScope<'_>,
         kind: EventKind,
-        now: DateTime<Utc>,
-        window: TimeDelta,
+        now: OffsetDateTime,
+        window: time::Duration,
     ) -> impl Future<Output = Result<bool, StoreError>> + Send {
         let _ = (scope, kind, now, window);
         std::future::ready(Ok(true))
@@ -309,8 +309,8 @@ impl<T: SessionStore> SessionStore for std::sync::Arc<T> {
 
     fn delete_expired(
         &self,
-        now: DateTime<Utc>,
-        idle_cutoff: DateTime<Utc>,
+        now: OffsetDateTime,
+        idle_cutoff: OffsetDateTime,
     ) -> impl Future<Output = Result<u64, StoreError>> + Send {
         (**self).delete_expired(now, idle_cutoff)
     }
@@ -319,7 +319,7 @@ impl<T: SessionStore> SessionStore for std::sync::Arc<T> {
         (**self).record_event(event)
     }
 
-    fn delete_events_before(&self, cutoff: DateTime<Utc>) -> impl Future<Output = Result<u64, StoreError>> + Send {
+    fn delete_events_before(&self, cutoff: OffsetDateTime) -> impl Future<Output = Result<u64, StoreError>> + Send {
         (**self).delete_events_before(cutoff)
     }
 
@@ -327,8 +327,8 @@ impl<T: SessionStore> SessionStore for std::sync::Arc<T> {
         &self,
         scope: ClaimScope<'_>,
         kind: EventKind,
-        now: DateTime<Utc>,
-        window: TimeDelta,
+        now: OffsetDateTime,
+        window: time::Duration,
     ) -> impl Future<Output = Result<bool, StoreError>> + Send {
         (**self).claim_event(scope, kind, now, window)
     }

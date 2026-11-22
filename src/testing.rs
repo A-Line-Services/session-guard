@@ -26,7 +26,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use chrono::{DateTime, TimeDelta, Utc};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
@@ -79,9 +79,9 @@ macro_rules! store_conformance {
 }
 
 /// The current time truncated to whole seconds.
-pub fn now_secs() -> DateTime<Utc> {
-    let now = Utc::now();
-    DateTime::from_timestamp(now.timestamp(), 0).unwrap_or(now)
+pub fn now_secs() -> OffsetDateTime {
+    let now = OffsetDateTime::now_utc();
+    now.replace_nanosecond(0).unwrap_or(now)
 }
 
 /// A fresh random token hash in bucket 0, so it pairs with the sessions [`sample_session_for`]
@@ -104,19 +104,19 @@ fn aligned_session_id() -> Uuid {
 }
 
 /// A session for a random subject, created at `now`, expiring in a day.
-pub fn sample_session(now: DateTime<Utc>) -> SessionRecord {
+pub fn sample_session(now: OffsetDateTime) -> SessionRecord {
     sample_session_for(&format!("\"conformance-{}\"", Uuid::new_v4()), now)
 }
 
 /// A session for `subject` (canonical JSON), created at `now`, expiring in a day.
-pub fn sample_session_for(subject: &str, now: DateTime<Utc>) -> SessionRecord {
+pub fn sample_session_for(subject: &str, now: OffsetDateTime) -> SessionRecord {
     SessionRecord {
         id: aligned_session_id(),
         subject: subject.to_owned(),
         created_at: now,
         authenticated_at: now,
         last_seen_at: now,
-        expires_at: now + TimeDelta::days(1),
+        expires_at: now + time::Duration::days(1),
         step_up_required: false,
         baseline: Baseline::new(Fingerprint {
             ip_prefix: "203.0.113.0/24".into(),
@@ -136,11 +136,11 @@ pub fn sample_session_for(subject: &str, now: DateTime<Utc>) -> SessionRecord {
     }
 }
 
-fn secs(n: i64) -> TimeDelta {
-    TimeDelta::seconds(n)
+fn secs(n: i64) -> time::Duration {
+    time::Duration::seconds(n)
 }
 
-fn rotation(new_token: TokenHash, supersede: Supersede, prune_before: DateTime<Utc>) -> Rotation {
+fn rotation(new_token: TokenHash, supersede: Supersede, prune_before: OffsetDateTime) -> Rotation {
     Rotation {
         new_token,
         supersede,
@@ -148,7 +148,7 @@ fn rotation(new_token: TokenHash, supersede: Supersede, prune_before: DateTime<U
     }
 }
 
-fn rotate(id: Uuid, now: DateTime<Utc>, rotation: Rotation) -> SessionUpdate {
+fn rotate(id: Uuid, now: OffsetDateTime, rotation: Rotation) -> SessionUpdate {
     SessionUpdate {
         rotation: Some(rotation),
         ..SessionUpdate::touch(id, now)
@@ -699,7 +699,7 @@ pub async fn delete_expired_absolute_and_idle<St: SessionStore>(store: St) {
     // drop `expired` on their own, so only the idle session is sure to be counted; the others
     // expire in real time.
     let base = far_past();
-    let later = Utc::now() + TimeDelta::days(1);
+    let later = OffsetDateTime::now_utc() + time::Duration::days(1);
     let mut expired = sample_session(base);
     expired.expires_at = base;
     let mut idle = sample_session(base);
@@ -843,10 +843,10 @@ pub async fn apply_to_missing_session<St: SessionStore>(store: St) {
 }
 
 /// A random whole-minute instant between 1900 and 1931.
-fn far_past() -> DateTime<Utc> {
+fn far_past() -> OffsetDateTime {
     let bytes = Uuid::new_v4().into_bytes();
     let minutes = i64::from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]));
-    DateTime::from_timestamp(-2_208_988_800 + minutes * 60, 0).unwrap_or_default()
+    OffsetDateTime::from_unix_timestamp(-2_208_988_800 + minutes * 60).unwrap_or(OffsetDateTime::UNIX_EPOCH)
 }
 
 /// Polls every future to completion concurrently, without a runtime dependency.
