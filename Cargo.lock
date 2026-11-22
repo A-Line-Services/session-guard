@@ -878,7 +878,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2349,9 +2349,9 @@ dependencies = [
 
 [[package]]
 name = "rovo"
-version = "0.4.16"
+version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af061668adaf965a52cfbce2b412da5cbe95a2247ed87e594d8dc516a7e9c4cc"
+checksum = "038a66eec05dc57d250434af877477e2948b9c222d11d0aef30e1b0d2e3ab601"
 dependencies = [
  "aide",
  "axum",
@@ -2364,9 +2364,9 @@ dependencies = [
 
 [[package]]
 name = "rovo-macros"
-version = "0.4.16"
+version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1ba068ce2cd34af499c7d63957d37b92bbea2897509399008360178f52c49b7"
+checksum = "1bf54d68faa3d8216f14286502a492ccf8bacd808e15c3d237ab6386a1ebb414"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2401,7 +2401,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2585,7 +2585,7 @@ version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d43fb82d550b07e6f929a58d7d0935182602f48ddead875f5ee313c41c8f07fe"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "nohash-hasher",
  "num-traits",
  "serde_core",
@@ -3139,7 +3139,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3749,7 +3749,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
