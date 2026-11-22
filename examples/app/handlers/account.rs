@@ -12,7 +12,7 @@ use crate::{
     Store,
     app::{
         errors::AppError,
-        models::{Done, ErrorBody, Me, SessionView},
+        models::{Done, ErrorBody, Me, SessionView, rfc3339},
         state::AppState,
     },
 };
@@ -34,8 +34,8 @@ pub async fn me(session: AuthSession<Uuid>) -> Json<Me> {
     Json(Me {
         subject: session.subject,
         session_id: session.session_id,
-        authenticated_at: session.authenticated_at.to_rfc3339(),
-        expires_at: session.expires_at.to_rfc3339(),
+        authenticated_at: rfc3339(session.authenticated_at),
+        expires_at: rfc3339(session.expires_at),
     })
 }
 

@@ -2,8 +2,8 @@
 
 use std::{fmt, net::IpAddr};
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
@@ -122,7 +122,7 @@ pub struct SessionEvent {
     /// default.
     pub client: ClientSummary,
     /// When it happened.
-    pub at: DateTime<Utc>,
+    pub at: OffsetDateTime,
 }
 
 impl SessionEvent {
@@ -182,7 +182,8 @@ impl ClientSummary {
 #[non_exhaustive]
 pub struct SessionOrigin {
     /// Login time.
-    pub at: DateTime<Utc>,
+    #[serde(with = "crate::rfc3339")]
+    pub at: OffsetDateTime,
     /// The client IP's /24 (IPv4) or /48 (IPv6) network address.
     pub ip_prefix: IpAddr,
     /// Client IP. Only with `keep_origin_client`.
@@ -255,6 +256,19 @@ mod tests {
     }
 
     #[test]
+    fn session_origin_timestamps_stay_rfc3339_utc() {
+        for (input, stored) in [
+            ("2026-03-01T12:00:00Z", "2026-03-01T12:00:00Z"),
+            ("2026-03-01T12:00:00.123456Z", "2026-03-01T12:00:00.123456Z"),
+            ("2026-03-01T13:00:00+01:00", "2026-03-01T12:00:00Z"),
+        ] {
+            let json = format!(r#"{{"at":"{input}","ip_prefix":"203.0.113.0"}}"#);
+            let origin: SessionOrigin = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_value(&origin).unwrap()["at"], stored, "{input}");
+        }
+    }
+
+    #[test]
     fn mask_ip_keeps_the_network() {
         assert_eq!(
             mask_ip("203.0.113.7".parse().unwrap()),
@@ -279,7 +293,7 @@ mod tests {
             ip: "203.0.113.7".parse().unwrap(),
             user_agent: None,
             client: ClientSummary::default(),
-            at: Utc::now(),
+            at: OffsetDateTime::now_utc(),
         };
         assert_eq!(event.subject::<Uuid>(), Some(id));
         assert_eq!(event.subject::<i64>(), None);

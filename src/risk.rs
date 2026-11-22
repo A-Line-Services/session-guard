@@ -1,6 +1,6 @@
 //! Scores the current request against a session's baseline.
 
-use chrono::{DateTime, TimeDelta, Utc};
+use time::OffsetDateTime;
 
 use crate::{
     checks::{Check, Checks, Decision, Thresholds},
@@ -45,8 +45,8 @@ impl Assessment {
 pub fn assess(
     baseline: &Baseline,
     current: &Fingerprint,
-    now: DateTime<Utc>,
-    ping_pong_window: TimeDelta,
+    now: OffsetDateTime,
+    ping_pong_window: time::Duration,
     checks: &Checks,
 ) -> Assessment {
     let known = &baseline.fingerprint;
@@ -122,9 +122,7 @@ pub fn assess(
 
         let returned =
             known_net.is_some() && baseline.previous_ip_prefix.as_deref() == Some(current.ip_prefix.as_str());
-        let recent = baseline
-            .ip_changed_at
-            .is_some_and(|at| now.signed_duration_since(at) <= ping_pong_window);
+        let recent = baseline.ip_changed_at.is_some_and(|at| now - at <= ping_pong_window);
         if returned && recent {
             fired.push(Check::IpPingPong);
         }
@@ -206,7 +204,13 @@ mod tests {
     }
 
     fn assess_now(baseline: &Baseline, current: &Fingerprint) -> Assessment {
-        assess(baseline, current, Utc::now(), TimeDelta::minutes(5), &Checks::default())
+        assess(
+            baseline,
+            current,
+            OffsetDateTime::now_utc(),
+            time::Duration::minutes(5),
+            &Checks::default(),
+        )
     }
 
     fn decide(current: &Fingerprint) -> (Decision, Vec<Check>) {
@@ -396,7 +400,7 @@ mod tests {
 
     #[test]
     fn alternating_between_two_networks_adds_ping_pong() {
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         let mut baseline = Baseline::new(chrome_on_windows());
         let mut elsewhere = chrome_on_windows();
         elsewhere.ip_prefix = "198.51.100.0/24".to_owned();
@@ -407,8 +411,8 @@ mod tests {
         let soon = assess(
             &baseline,
             &back,
-            now + TimeDelta::seconds(20),
-            TimeDelta::minutes(5),
+            now + time::Duration::seconds(20),
+            time::Duration::minutes(5),
             &Checks::default(),
         );
         assert_eq!(soon.signals, vec![Check::IpPingPong, Check::AsnChanged]);
@@ -418,8 +422,8 @@ mod tests {
         let later = assess(
             &baseline,
             &back,
-            now + TimeDelta::minutes(10),
-            TimeDelta::minutes(5),
+            now + time::Duration::minutes(10),
+            time::Duration::minutes(5),
             &Checks::default(),
         );
         assert_eq!(later.signals, vec![Check::AsnChanged]);
@@ -492,16 +496,20 @@ mod tests {
 
     #[test]
     fn toggling_a_vpn_back_on_does_not_revoke() {
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         let mut baseline = Baseline::new(chrome_on_windows());
         baseline.absorb(&via(Anonymity::Vpn), now, &Checks::default());
-        baseline.absorb(&chrome_on_windows(), now + TimeDelta::seconds(10), &Checks::default());
+        baseline.absorb(
+            &chrome_on_windows(),
+            now + time::Duration::seconds(10),
+            &Checks::default(),
+        );
 
         let a = assess(
             &baseline,
             &via(Anonymity::Vpn),
-            now + TimeDelta::seconds(20),
-            TimeDelta::minutes(5),
+            now + time::Duration::seconds(20),
+            time::Duration::minutes(5),
             &Checks::default(),
         );
         // The client was already trusted on this VPN: only the bounce counts.
@@ -526,8 +534,8 @@ mod tests {
         let a = assess(
             &Baseline::new(chrome_on_windows()),
             &current,
-            Utc::now(),
-            TimeDelta::minutes(5),
+            OffsetDateTime::now_utc(),
+            time::Duration::minutes(5),
             &checks,
         );
         assert_eq!(a.signals, vec![Check::InconsistentHints]);
@@ -535,8 +543,8 @@ mod tests {
         let none = assess(
             &Baseline::new(chrome_on_windows()),
             &current,
-            Utc::now(),
-            TimeDelta::minutes(5),
+            OffsetDateTime::now_utc(),
+            time::Duration::minutes(5),
             &Checks::none(),
         );
         assert_eq!(none, Assessment::default());
@@ -594,15 +602,15 @@ mod tests {
                 // Linux is only a routine change for Android devices.
                 return Ok(());
             }
-            let now = Utc::now();
+            let now = OffsetDateTime::now_utc();
             let mut baseline = Baseline::new(fp.clone());
             let mut current = fp.clone();
             apply_routine(&mut current, kind, n);
             if previous {
                 baseline.previous_ip_prefix = Some(current.ip_prefix.clone());
-                baseline.ip_changed_at = Some(now - TimeDelta::seconds(secs));
+                baseline.ip_changed_at = Some(now - time::Duration::seconds(secs));
             }
-            let a = assess(&baseline, &current, now, TimeDelta::minutes(5), &Checks::default());
+            let a = assess(&baseline, &current, now, time::Duration::minutes(5), &Checks::default());
             prop_assert_ne!(a.decision(&Thresholds::default()), Decision::Revoke, "{:?}", a);
         }
 
@@ -619,7 +627,7 @@ mod tests {
                 os, browser, browser_major: major, ch_platform: platform, ch_mobile: mobile,
                 accept_language: lang, ..chrome_on_windows()
             };
-            let a = assess(&Baseline::new(chrome_on_windows()), &current, Utc::now(), TimeDelta::minutes(5), &Checks::default());
+            let a = assess(&Baseline::new(chrome_on_windows()), &current, OffsetDateTime::now_utc(), time::Duration::minutes(5), &Checks::default());
             let sum: u32 = a.signals.iter().map(|c| c.default_weight()).sum();
             prop_assert_eq!(a.score, sum);
         }

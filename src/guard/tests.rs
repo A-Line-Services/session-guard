@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, TimeZone, Utc};
+use time::{OffsetDateTime, macros::datetime};
 use uuid::Uuid;
 
 use super::*;
@@ -20,8 +20,8 @@ const CHROME_WIN: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const FIREFOX_LINUX: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
 
-fn start() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap()
+fn start() -> OffsetDateTime {
+    datetime!(2026-03-01 12:00 UTC)
 }
 
 fn mins(n: u64) -> Duration {
@@ -172,7 +172,7 @@ async fn login_then_authenticate() {
             .starts_with(&format!("__Host-sid={}", new.token.expose()))
     );
     assert_eq!(max_age(new.token.set_cookie()), 30 * 24 * 3600);
-    assert_eq!(new.token.expires_at(), start() + chrono::TimeDelta::days(30));
+    assert_eq!(new.token.expires_at(), start() + time::Duration::days(30));
     assert!(!format!("{:?}", new.token).contains(new.token.expose()));
 
     let a = authenticated(h.guard.authenticate(new.token.expose(), &home()).await.unwrap());
@@ -615,12 +615,12 @@ async fn step_up_flow() {
     };
     assert_ne!(t1.expose(), t0);
     let a = authenticated(h.guard.authenticate(t1.expose(), &abroad()).await.unwrap());
-    assert_eq!(a.session.authenticated_at, start() + chrono::TimeDelta::minutes(2));
+    assert_eq!(a.session.authenticated_at, start() + time::Duration::minutes(2));
     assert!(a.assessment.signals.is_empty(), "baseline was reset to the new client");
     assert!(!h.guard.requires_reauth(&a.session, mins(5)));
     assert_eq!(h.count(EventKind::StepUpCompleted), 1);
     // Step-up does not extend the absolute lifetime.
-    let lifetime = chrono::TimeDelta::days(30);
+    let lifetime = time::Duration::days(30);
     assert_eq!(a.session.expires_at, start() + lifetime);
     assert_eq!(t1.expires_at(), start() + lifetime);
 }
@@ -805,7 +805,7 @@ impl SessionStore for FailingClaims {
         self.0.list_subject_sessions(subject).await
     }
 
-    async fn delete_expired(&self, now: DateTime<Utc>, idle_cutoff: DateTime<Utc>) -> Result<u64, crate::StoreError> {
+    async fn delete_expired(&self, now: OffsetDateTime, idle_cutoff: OffsetDateTime) -> Result<u64, crate::StoreError> {
         self.0.delete_expired(now, idle_cutoff).await
     }
 
@@ -813,7 +813,7 @@ impl SessionStore for FailingClaims {
         self.0.record_event(event).await
     }
 
-    async fn delete_events_before(&self, cutoff: DateTime<Utc>) -> Result<u64, crate::StoreError> {
+    async fn delete_events_before(&self, cutoff: OffsetDateTime) -> Result<u64, crate::StoreError> {
         self.0.delete_events_before(cutoff).await
     }
 
@@ -821,8 +821,8 @@ impl SessionStore for FailingClaims {
         &self,
         _scope: ClaimScope<'_>,
         _kind: EventKind,
-        _now: DateTime<Utc>,
-        _window: chrono::TimeDelta,
+        _now: OffsetDateTime,
+        _window: time::Duration,
     ) -> impl Future<Output = Result<bool, crate::StoreError>> + Send {
         std::future::ready(Err("claims unavailable".into()))
     }
@@ -1006,7 +1006,7 @@ async fn list_sessions_describes_devices_and_skips_expired() {
     assert_eq!(list[0].os.as_deref(), Some("Windows"));
     assert_eq!(list[0].country.as_deref(), Some("US"));
     let origin = list[0].origin.as_ref().expect("login records the origin");
-    assert_eq!(origin.at, start() + chrono::TimeDelta::minutes(61));
+    assert_eq!(origin.at, start() + time::Duration::minutes(61));
     assert_eq!(origin.ip_prefix, ip("203.0.113.0"));
 }
 
@@ -1389,7 +1389,7 @@ impl SessionStore for RacingStore {
                     update.rotation = Some(Rotation {
                         new_token: SessionToken::generate().unwrap().hash(),
                         supersede: Supersede::Current,
-                        prune_superseded_before: now - chrono::TimeDelta::days(1),
+                        prune_superseded_before: now - time::Duration::days(1),
                     });
                     self.inner.apply(&update).await?;
                 }
@@ -1414,7 +1414,7 @@ impl SessionStore for RacingStore {
         self.inner.list_subject_sessions(subject).await
     }
 
-    async fn delete_expired(&self, now: DateTime<Utc>, idle_cutoff: DateTime<Utc>) -> Result<u64, crate::StoreError> {
+    async fn delete_expired(&self, now: OffsetDateTime, idle_cutoff: OffsetDateTime) -> Result<u64, crate::StoreError> {
         self.inner.delete_expired(now, idle_cutoff).await
     }
 
@@ -1422,7 +1422,7 @@ impl SessionStore for RacingStore {
         self.inner.record_event(event).await
     }
 
-    async fn delete_events_before(&self, cutoff: DateTime<Utc>) -> Result<u64, crate::StoreError> {
+    async fn delete_events_before(&self, cutoff: OffsetDateTime) -> Result<u64, crate::StoreError> {
         self.inner.delete_events_before(cutoff).await
     }
 }

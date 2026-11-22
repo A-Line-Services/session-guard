@@ -6,7 +6,7 @@ use std::{
     sync::{Mutex, MutexGuard, PoisonError},
 };
 
-use chrono::{DateTime, TimeDelta, Utc};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{ClaimScope, SessionRecord, SessionStore, SessionUpdate, Supersede, TokenLookup, TokenRecord};
@@ -30,7 +30,7 @@ struct State {
     sessions: HashMap<Uuid, Entry>,
     token_index: HashMap<TokenHash, Uuid>,
     events: Vec<SessionEvent>,
-    claims: HashMap<(ClaimKey, EventKind), DateTime<Utc>>,
+    claims: HashMap<(ClaimKey, EventKind), OffsetDateTime>,
     misaligned: Vec<Uuid>,
 }
 
@@ -277,8 +277,8 @@ impl SessionStore for MemoryStore {
 
     fn delete_expired(
         &self,
-        now: DateTime<Utc>,
-        idle_cutoff: DateTime<Utc>,
+        now: OffsetDateTime,
+        idle_cutoff: OffsetDateTime,
     ) -> impl Future<Output = Result<u64, StoreError>> + Send {
         self.with(|state| {
             let ids: Vec<Uuid> = state
@@ -295,7 +295,7 @@ impl SessionStore for MemoryStore {
         self.with(|state| state.events.push(event.clone()))
     }
 
-    fn delete_events_before(&self, cutoff: DateTime<Utc>) -> impl Future<Output = Result<u64, StoreError>> + Send {
+    fn delete_events_before(&self, cutoff: OffsetDateTime) -> impl Future<Output = Result<u64, StoreError>> + Send {
         self.with(|state| {
             let before = state.events.len();
             state.events.retain(|e| e.at >= cutoff);
@@ -308,8 +308,8 @@ impl SessionStore for MemoryStore {
         &self,
         scope: ClaimScope<'_>,
         kind: EventKind,
-        now: DateTime<Utc>,
-        window: TimeDelta,
+        now: OffsetDateTime,
+        window: time::Duration,
     ) -> impl Future<Output = Result<bool, StoreError>> + Send {
         let key = match scope {
             ClaimScope::Session(id) => (ClaimKey::Session(id), kind),

@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use chrono::TimeDelta;
 use session_guard::{ClaimScope, EventKind, Rotation, SessionStore, SessionUpdate, Supersede, ValkeyStore, testing};
 use uuid::Uuid;
 
@@ -54,7 +53,7 @@ async fn concurrent_rotation_across_tasks_has_one_winner() {
                     supersede: Supersede::Exact(first),
                     prune_superseded_before: now,
                 }),
-                ..SessionUpdate::touch(session.id, now + TimeDelta::seconds(1))
+                ..SessionUpdate::touch(session.id, now + time::Duration::seconds(1))
             };
             (candidate, store.apply(&update).await.unwrap())
         }));
@@ -70,7 +69,7 @@ async fn concurrent_rotation_across_tasks_has_one_winner() {
     let current = store.find_by_token(&winners[0]).await.unwrap().unwrap();
     assert_eq!(current.token.superseded_at, None);
     let old = store.find_by_token(&first).await.unwrap().unwrap();
-    assert_eq!(old.token.superseded_at, Some(now + TimeDelta::seconds(1)));
+    assert_eq!(old.token.superseded_at, Some(now + time::Duration::seconds(1)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -79,11 +78,11 @@ async fn claims_dedupe_across_store_instances() {
     let a = store_with_prefix(&prefix).await;
     let b = store_with_prefix(&prefix).await;
     let now = testing::now_secs();
-    let window = TimeDelta::seconds(600);
+    let window = time::Duration::seconds(600);
     let scope = ClaimScope::Session(Uuid::new_v4());
     assert!(a.claim_event(scope, EventKind::RiskRevoked, now, window).await.unwrap());
     assert!(
-        !b.claim_event(scope, EventKind::RiskRevoked, now + TimeDelta::seconds(5), window)
+        !b.claim_event(scope, EventKind::RiskRevoked, now + time::Duration::seconds(5), window)
             .await
             .unwrap()
     );
@@ -103,7 +102,7 @@ async fn claims_dedupe_across_store_instances() {
 async fn claims_older_than_cutoff_are_purged() {
     let store = store().await;
     let now = testing::now_secs();
-    let window = TimeDelta::seconds(600);
+    let window = time::Duration::seconds(600);
     let scope = ClaimScope::Session(Uuid::new_v4());
     assert!(
         store
@@ -112,12 +111,15 @@ async fn claims_older_than_cutoff_are_purged() {
             .unwrap()
     );
     assert_eq!(
-        store.delete_events_before(now + TimeDelta::seconds(1)).await.unwrap(),
+        store
+            .delete_events_before(now + time::Duration::seconds(1))
+            .await
+            .unwrap(),
         0
     );
     assert!(
         store
-            .claim_event(scope, EventKind::RiskRevoked, now + TimeDelta::seconds(1), window)
+            .claim_event(scope, EventKind::RiskRevoked, now + time::Duration::seconds(1), window)
             .await
             .unwrap(),
         "the purged claim no longer blocks"

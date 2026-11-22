@@ -2,10 +2,10 @@
 
 use std::net::IpAddr;
 
-use chrono::{DateTime, Utc};
 use ipnet::IpNet;
 use quick_cache::sync::Cache;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::{
     checks::{Check, Checks},
@@ -91,7 +91,8 @@ pub struct Baseline {
     /// The network the client was on before the last move.
     pub previous_ip_prefix: Option<String>,
     /// When the client last moved network.
-    pub ip_changed_at: Option<DateTime<Utc>>,
+    #[serde(with = "crate::rfc3339::option")]
+    pub ip_changed_at: Option<OffsetDateTime>,
     /// The client's known IPv4 /24. A dual-stack browser alternates between address families,
     /// so each family's network is remembered on its own. Absent in baselines stored by 0.3.2
     /// and earlier, where `fingerprint.ip_prefix` stands in for its family.
@@ -164,7 +165,7 @@ impl Baseline {
     /// scored are learned, so a route with looser checks cannot slip a change past stricter
     /// ones. Hard identity is never learned and missing values never erase known ones. Returns
     /// whether anything changed.
-    pub fn absorb(&mut self, current: &Fingerprint, now: DateTime<Utc>, checks: &Checks) -> bool {
+    pub fn absorb(&mut self, current: &Fingerprint, now: OffsetDateTime, checks: &Checks) -> bool {
         let before = self.clone();
         let ip_scored = checks.scores(Check::IpPrefixChanged) || checks.scores(Check::IpPingPong);
         if ip_scored && !current.ip_prefix.is_empty() {
@@ -427,7 +428,7 @@ pub(crate) mod tests {
             ip_prefix: "192.0.2.0/24".to_owned(),
             ..Fingerprint::default()
         };
-        baseline.absorb(&v4, Utc::now(), &Checks::default());
+        baseline.absorb(&v4, OffsetDateTime::now_utc(), &Checks::default());
         assert_eq!(baseline.ipv6_prefix.as_deref(), Some("2001:db8:1::/48"));
         assert_eq!(baseline.ipv4_prefix.as_deref(), Some("192.0.2.0/24"));
         assert_eq!(baseline.previous_ip_prefix, None, "a new family is no move");
@@ -435,7 +436,7 @@ pub(crate) mod tests {
 
     #[test]
     fn absorb_tracks_moves_and_never_downgrades_version() {
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         let original = base();
         let mut baseline = Baseline::new(original.clone());
 
@@ -465,7 +466,7 @@ pub(crate) mod tests {
         other.os = Some("Linux".into());
         other.ch_platform = Some("Linux".into());
         other.ch_mobile = Some(true);
-        assert!(!baseline.absorb(&other, Utc::now(), &Checks::default()));
+        assert!(!baseline.absorb(&other, OffsetDateTime::now_utc(), &Checks::default()));
         assert_eq!(baseline.fingerprint, base());
     }
 
@@ -482,11 +483,11 @@ pub(crate) mod tests {
             .disable(Check::IpPrefixChanged)
             .disable(Check::IpPingPong)
             .weight(Check::AcceptLanguageChanged, 0);
-        assert!(!baseline.absorb(&moved, Utc::now(), &checks));
+        assert!(!baseline.absorb(&moved, OffsetDateTime::now_utc(), &checks));
         assert_eq!(baseline.fingerprint, original);
 
         let ping_pong_only = Checks::none().enable(Check::IpPingPong);
-        assert!(baseline.absorb(&moved, Utc::now(), &ping_pong_only));
+        assert!(baseline.absorb(&moved, OffsetDateTime::now_utc(), &ping_pong_only));
         assert_eq!(baseline.fingerprint.ip_prefix, "198.51.100.0/24");
         assert_eq!(baseline.fingerprint.asn, original.asn);
     }
@@ -504,7 +505,7 @@ pub(crate) mod tests {
             fp.anonymity = anonymity;
             fp
         };
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
 
         let mut baseline = Baseline::new(direct());
         let loose = Checks::default().disable(Check::AnonymizerEntered);
@@ -531,7 +532,26 @@ pub(crate) mod tests {
     #[test]
     fn absorb_reports_no_change_for_identical_request() {
         let mut baseline = Baseline::new(base());
-        assert!(!baseline.absorb(&base(), Utc::now(), &Checks::default()));
+        assert!(!baseline.absorb(&base(), OffsetDateTime::now_utc(), &Checks::default()));
+    }
+
+    #[test]
+    fn baseline_timestamps_stay_rfc3339_utc() {
+        for (input, stored) in [
+            ("2026-03-01T12:00:00Z", "2026-03-01T12:00:00Z"),
+            ("2026-03-01T12:00:00.123456Z", "2026-03-01T12:00:00.123456Z"),
+            ("2026-03-01T13:00:00+01:00", "2026-03-01T12:00:00Z"),
+        ] {
+            let json = format!(r#"{{"ip_changed_at":"{input}"}}"#);
+            let baseline: Baseline = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                serde_json::to_value(&baseline).unwrap()["ip_changed_at"],
+                stored,
+                "{input}"
+            );
+        }
+        let json = serde_json::to_value(Baseline::default()).unwrap();
+        assert_eq!(json["ip_changed_at"], serde_json::Value::Null);
     }
 
     #[test]

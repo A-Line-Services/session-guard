@@ -2,7 +2,6 @@
 
 use std::{net::IpAddr, time::Duration};
 
-use chrono::TimeDelta;
 use ipnet::IpNet;
 
 use crate::{
@@ -69,27 +68,27 @@ impl Default for RotationConfig {
 #[derive(Clone, Debug)]
 pub struct GuardConfig {
     pub(crate) cookie: CookieConfig,
-    pub(crate) session_lifetime: TimeDelta,
-    pub(crate) idle_timeout: TimeDelta,
+    pub(crate) session_lifetime: time::Duration,
+    pub(crate) idle_timeout: time::Duration,
     pub(crate) trusted_proxies: Vec<IpNet>,
     pub(crate) tls_fingerprint_header: Option<String>,
-    pub(crate) rotation_interval: TimeDelta,
-    pub(crate) rotation_grace: TimeDelta,
-    pub(crate) reuse_detection: TimeDelta,
+    pub(crate) rotation_interval: time::Duration,
+    pub(crate) rotation_grace: time::Duration,
+    pub(crate) reuse_detection: time::Duration,
     pub(crate) checks: Checks,
     pub(crate) thresholds: Thresholds,
     pub(crate) mode: Mode,
     pub(crate) step_up_policy: StepUpPolicy,
-    pub(crate) ping_pong_window: TimeDelta,
-    pub(crate) last_seen_write_interval: TimeDelta,
-    pub(crate) event_retention: TimeDelta,
+    pub(crate) ping_pong_window: time::Duration,
+    pub(crate) last_seen_write_interval: time::Duration,
+    pub(crate) event_retention: time::Duration,
     pub(crate) minimize_stored_events: bool,
     pub(crate) keep_origin_client: bool,
-    pub(crate) shadow_dedup_window: TimeDelta,
-    pub(crate) alert_dedup_window: TimeDelta,
+    pub(crate) shadow_dedup_window: time::Duration,
+    pub(crate) alert_dedup_window: time::Duration,
     pub(crate) max_header_len: usize,
     pub(crate) token_prefix: Option<String>,
-    pub(crate) orphan_reissue_window: Option<TimeDelta>,
+    pub(crate) orphan_reissue_window: Option<time::Duration>,
 }
 
 impl Default for GuardConfig {
@@ -215,8 +214,8 @@ impl GuardConfig {
     }
 }
 
-fn to_std(delta: TimeDelta) -> Duration {
-    delta.to_std().unwrap_or_default()
+fn to_std(delta: time::Duration) -> Duration {
+    Duration::try_from(delta).unwrap_or_default()
 }
 
 /// Builder for [`GuardConfig`].
@@ -506,18 +505,18 @@ impl GuardConfigBuilder {
     }
 }
 
-fn positive(d: Duration, name: &'static str) -> Result<TimeDelta, ConfigError> {
+fn positive(d: Duration, name: &'static str) -> Result<time::Duration, ConfigError> {
     if d.is_zero() {
         return Err(ConfigError::InvalidDuration(name));
     }
     bounded(d, name)
 }
 
-fn bounded(d: Duration, name: &'static str) -> Result<TimeDelta, ConfigError> {
+fn bounded(d: Duration, name: &'static str) -> Result<time::Duration, ConfigError> {
     if d > MAX_DURATION {
         return Err(ConfigError::InvalidDuration(name));
     }
-    TimeDelta::from_std(d).map_err(|_| ConfigError::InvalidDuration(name))
+    time::Duration::try_from(d).map_err(|_| ConfigError::InvalidDuration(name))
 }
 
 #[cfg(test)]

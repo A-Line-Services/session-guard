@@ -4,12 +4,12 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, TimeDelta, Utc};
 use criterion::{Criterion, criterion_group, criterion_main};
 use session_guard::{
     __bench::CachedCapture, Baseline, Checks, ClientContext, Fingerprint, Guard, GuardConfig, IpInfo, ManualClock,
     MemoryStore, Outcome, TokenHash, assess,
 };
+use time::OffsetDateTime;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 
@@ -17,8 +17,8 @@ const CHROME: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.
                       Chrome/124.0.0.0 Safari/537.36";
 const FIREFOX: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.4; rv:125.0) Gecko/20100101 Firefox/125.0";
 
-fn start() -> DateTime<Utc> {
-    "2026-01-01T00:00:00Z".parse().unwrap()
+fn start() -> OffsetDateTime {
+    time::macros::datetime!(2026-01-01 00:00 UTC)
 }
 
 fn ctx() -> ClientContext {
@@ -100,7 +100,7 @@ fn risk(c: &mut Criterion) {
     let moved = ClientContext::new("198.51.100.20".parse().unwrap()).with_user_agent(FIREFOX);
     let current = Fingerprint::capture(&moved, &IpInfo::new(Some("NL".into()), Some(1136)));
     let checks = Checks::default();
-    let window = TimeDelta::minutes(10);
+    let window = time::Duration::minutes(10);
     c.bench_function("risk/assess_changed", |b| {
         b.iter(|| assess(black_box(&baseline), black_box(&current), start(), window, &checks));
     });

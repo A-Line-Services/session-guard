@@ -4,7 +4,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::LazyLock;
 
-use chrono::{DateTime, TimeDelta};
+use time::OffsetDateTime;
 use libfuzzer_sys::fuzz_target;
 use session_guard::{
     __bench::CachedCapture, Baseline, Check, Checks, ClientContext, Fingerprint, Guard, GuardConfig, IpInfo,
@@ -37,12 +37,12 @@ fn check_fingerprint(ctx: &ClientContext) {
     assert_eq!(CACHE.capture(ctx, &info), fingerprint, "cache miss differs");
     assert_eq!(CACHE.capture(ctx, &info), fingerprint, "cache hit differs");
 
-    let now = DateTime::UNIX_EPOCH;
+    let now = OffsetDateTime::UNIX_EPOCH;
     let assessment = assess(
         &Baseline::new(fingerprint.clone()),
         &fingerprint,
         now,
-        TimeDelta::minutes(10),
+        time::Duration::minutes(10),
         &Checks::strict(),
     );
     // Only the point-in-time hint check may fire when nothing changed.

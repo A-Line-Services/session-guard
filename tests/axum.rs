@@ -14,13 +14,13 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
-use chrono::{DateTime, TimeZone, Utc};
 use http_body_util::BodyExt;
 use session_guard::{
     AuthSession, Checks, ClientContext, Guard, GuardConfig, GuardError, GuardLayer, IpInfo, IssuedToken, ManualClock,
     MemoryStore, NewSession, Rejection, SessionEvent, SessionRecord, SessionStore, StoreError, TokenHash, TokenLookup,
     axum::{LoggedOut, Sessions, StepUpError, StepUpFailure},
 };
+use time::{OffsetDateTime, macros::datetime};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -28,8 +28,8 @@ const CHROME_WIN: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const HOME: &str = "203.0.113.7";
 
-fn start() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap()
+fn start() -> OffsetDateTime {
+    datetime!(2026-03-01 12:00 UTC)
 }
 
 fn intel(ip: IpAddr) -> IpInfo {
@@ -739,13 +739,13 @@ impl SessionStore for FailingStore {
     async fn list_subject_sessions(&self, _: &str) -> Result<Vec<SessionRecord>, StoreError> {
         fail()
     }
-    async fn delete_expired(&self, _: DateTime<Utc>, _: DateTime<Utc>) -> Result<u64, StoreError> {
+    async fn delete_expired(&self, _: OffsetDateTime, _: OffsetDateTime) -> Result<u64, StoreError> {
         fail()
     }
     async fn record_event(&self, _: &SessionEvent) -> Result<(), StoreError> {
         fail()
     }
-    async fn delete_events_before(&self, _: DateTime<Utc>) -> Result<u64, StoreError> {
+    async fn delete_events_before(&self, _: OffsetDateTime) -> Result<u64, StoreError> {
         fail()
     }
 }

@@ -3,7 +3,13 @@
 use rovo::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session_guard::SessionInfo;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
+
+/// `at` as an RFC 3339 string.
+pub fn rfc3339(at: OffsetDateTime) -> String {
+    at.format(&Rfc3339).unwrap_or_default()
+}
 
 /// What the client sends to log in, and again to step up.
 #[derive(Deserialize, JsonSchema)]
@@ -77,8 +83,8 @@ impl SessionView {
         Self {
             session_id: info.session_id,
             current: info.session_id == current,
-            created_at: info.created_at.to_rfc3339(),
-            last_seen_at: info.last_seen_at.to_rfc3339(),
+            created_at: rfc3339(info.created_at),
+            last_seen_at: rfc3339(info.last_seen_at),
             browser: info.browser,
             os: info.os,
             country: info.country,
