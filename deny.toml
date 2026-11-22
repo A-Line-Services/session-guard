@@ -8,6 +8,9 @@ ignore = [
     # Unmaintained tar crate pulled in by testcontainers (dev-only, never ships).
     # Drop once testcontainers moves off it.
     { id = "RUSTSEC-2026-0440", reason = "dev-only via testcontainers; no maintained replacement upstream yet" },
+    # chrono is unmaintained (no vulnerability). Its types are in our public API
+    # and sqlx's `chrono` feature, so leaving it is a breaking change.
+    { id = "RUSTSEC-2026-0543", reason = "chrono types are public API; migrating off is a breaking change" },
 ]
 
 [licenses]
