@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-23
+
+### Breaking Changes
+
+- feat!: replace chrono with time ([#34](https://github.com/A-Line-Services/session-guard/pull/34)) by @Arthurdw
+
+### Bug Fixes
+
+- fix(deps): bump url and ignore chrono advisory ([#33](https://github.com/A-Line-Services/session-guard/pull/33)) by @Arthurdw
+
+### Chores
+
+- chore(deps): bump rovo from 0.4.16 to 0.4.17 ([#32](https://github.com/A-Line-Services/session-guard/pull/32)) by @dependabot[bot]
+- chore(deps): bump uuid from 1.29.2 to 1.29.3 ([#29](https://github.com/A-Line-Services/session-guard/pull/29)) by @dependabot[bot]
+- chore(deps): bump taiki-e/install-action from 2.90.3 to 2.90.6 ([#28](https://github.com/A-Line-Services/session-guard/pull/28)) by @dependabot[bot]
+- chore(deps): bump sqlx from 0.9.0 to 0.9.1 ([#30](https://github.com/A-Line-Services/session-guard/pull/30)) by @dependabot[bot]
+- chore(deps): bump EmbarkStudios/cargo-deny-action from 2.1.1 to 2.1.3 ([#27](https://github.com/A-Line-Services/session-guard/pull/27)) by @dependabot[bot]
+- chore(deps): bump zeroize from 1.9.1 to 1.9.2 ([#31](https://github.com/A-Line-Services/session-guard/pull/31)) by @dependabot[bot]
+
 ## [0.3.3] - 2026-11-16
 
 ### Bug Fixes
